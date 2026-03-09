@@ -294,6 +294,7 @@ export class UIScene extends Phaser.Scene {
     // ── Refresh selection panel and action bar for new layout ─────────────
     this.updateSelectionPanel();
     this.updateActionBar();
+    this.productionQueueDirty = true; // layout changed, positions need recalculating
     this.updateProductionQueueUI();
   }
 
@@ -1955,11 +1956,13 @@ export class UIScene extends Phaser.Scene {
     EventBus.on(GameEvents.BUILDING_SELECTED, () => {
       this.updateSelectionPanel();
       this.updateActionBar();
+      this.productionQueueDirty = true; // new building selected, rebuild queue UI
     });
 
     EventBus.on(GameEvents.SELECTION_CLEARED, () => {
       this.updateSelectionPanel();
       this.updateActionBar();
+      this.productionQueueDirty = true; // selection cleared, rebuild queue UI
     });
 
     // ── Stance changed: refresh action bar to highlight new stance ──────
@@ -2048,6 +2051,7 @@ export class UIScene extends Phaser.Scene {
       const unitDef = UNIT_DEFS[data.unitType as keyof typeof UNIT_DEFS];
       const name = unitDef ? unitDef.name : data.unitType;
       this.pushAlert(`${name} trained!`, '#00FF00');
+      this.productionQueueDirty = true; // unit completed, queue structure changed
     });
 
     // ── Transport route created ─────────────────────────────────────────

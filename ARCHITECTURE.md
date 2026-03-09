@@ -49,10 +49,12 @@ Exports: `BuildingType` enum, `BuildingStats` interface, `BUILDING_DEFS` record.
 `Building.ts`, `MapSystem.ts`, `BuildingSystem.ts`, `BootScene.ts`, `GameScene.ts`
 
 #### `families.ts`
-Exports: `FamilyData` interface, `FAMILIES` array.
+Exports: `FamilyData` interface, `FamilyModifiers` interface, `DEFAULT_MODIFIERS` constant, `FAMILIES` array.
+
+`FamilyModifiers` fields: `buildingHpMultiplier`, `garrisonReductionBonus`, `influenceGainMultiplier`, `unitDpsMultiplier`, `coverDpsBonus`, `trainTimeMultiplier`, `unitCostMultiplier`, `cashIncomeMultiplier`, `truckCapacityBonus`.
 
 **Imported by:**
-`LobbyScene.ts`
+`LobbyScene.ts`, `GameScene.ts`, `CombatSystem.ts`, `EconomySystem.ts`
 
 ---
 
@@ -117,20 +119,25 @@ Exports: `FamilyData` interface, `FAMILIES` array.
 **Events emitted:** None directly (delegates to Building entity)
 
 #### `CombatSystem.ts`
-**Imports from:** `config.ts` (TILE_SIZE, TerrainType, COVER_DAMAGE_REDUCTION, GARRISON_DAMAGE_REDUCTION, FLANK_DAMAGE_BONUS, RETREAT_DPS_MULTIPLIER, VETERANCY_BONUS), `EventBus.ts` (EventBus, GameEvents), `IsometricUtils.ts` (tileToWorld)
+**Imports from:** `config.ts` (TILE_SIZE, TerrainType, COVER_DAMAGE_REDUCTION, GARRISON_DAMAGE_REDUCTION, FLANK_DAMAGE_BONUS, RETREAT_DPS_MULTIPLIER, VETERANCY_BONUS), `families.ts` (FamilyModifiers, DEFAULT_MODIFIERS), `EventBus.ts` (EventBus, GameEvents), `IsometricUtils.ts` (tileToWorld)
 
 **Imported by:** `GameScene.ts`
 
 **Events emitted:** `COMBAT_STARTED`, `UNIT_DAMAGED`, `UNIT_KILLED`
 
-**Notable:** Uses `any` types for squad references via `setSquadLookup()`. Reads terrain from `(this.scene as any).tilemap`.
+**Notable:**
+- Uses `any` types for squad references via `setSquadLookup()`. Reads terrain from `(this.scene as any).tilemap`.
+- `setPlayerModifiers(player, modifiers)` stores per-player `FamilyModifiers`. Damage calculation applies `unitDpsMultiplier` for the attacker and `coverDpsBonus` when in cover.
+- `takeDamage()` calls on targets now pass the attacker squad reference: `target.takeDamage(finalDamage, attacker)`. This enables defensive-stance squads to identify and fight back against their attacker.
 
 #### `EconomySystem.ts`
-**Imports from:** `config.ts` (STARTING_CASH, STARTING_GOODS, STARTING_INFLUENCE, BUILDING_MAINTENANCE, TICK_RATE, TIER_COSTS), `EventBus.ts` (EventBus, GameEvents)
+**Imports from:** `config.ts` (STARTING_CASH, STARTING_GOODS, STARTING_INFLUENCE, BUILDING_MAINTENANCE, TICK_RATE, TIER_COSTS), `families.ts` (FamilyModifiers, DEFAULT_MODIFIERS), `EventBus.ts` (EventBus, GameEvents)
 
 **Imported by:** `GameScene.ts`
 
 **Events emitted:** `CASH_CHANGED`, `GOODS_CHANGED`, `INFLUENCE_CHANGED`, `INCOME_TICK`, `TIER_RESEARCH_STARTED`, `TIER_ADVANCED`
+
+**Notable:** `setPlayerModifiers(player, modifiers)` stores per-player `FamilyModifiers`. Income calculation applies `cashIncomeMultiplier` from the player's selected family.
 
 #### `LogisticsSystem.ts`
 **Imports from:** `config.ts` (TILE_SIZE), `EventBus.ts` (EventBus, GameEvents), `IsometricUtils.ts` (tileToWorld)
@@ -169,11 +176,13 @@ Exports: `FamilyData` interface, `FAMILIES` array.
 **Imports from:** `config.ts` (TILE_WIDTH, TILE_HEIGHT, TerrainType), `buildings.ts` (BUILDING_DEFS, BuildingType), `units.ts` (UNIT_DEFS, UnitType)
 
 #### `GameScene.ts`
-**Imports from:** `config.ts` (MAP_WIDTH, MAP_HEIGHT, TILE_WIDTH, TILE_HEIGHT, WORLD_WIDTH, WORLD_HEIGHT, camera constants, TIER_COSTS, STARTING_CASH, STARTING_GOODS, STARTING_INFLUENCE), `units.ts` (UnitType, UNIT_DEFS), `buildings.ts` (BuildingType), `MapSystem.ts`, `UnitSystem.ts`, `BuildingSystem.ts`, `CombatSystem.ts`, `EconomySystem.ts`, `LogisticsSystem.ts`, `TerritorySystem.ts`, `FogOfWarSystem.ts`, `Pathfinding.ts` (pathfinding), `EventBus.ts` (EventBus, GameEvents), `IsometricUtils.ts` (tileToWorld, worldToTile, isoDepth)
+**Imports from:** `config.ts` (MAP_WIDTH, MAP_HEIGHT, TILE_WIDTH, TILE_HEIGHT, WORLD_WIDTH, WORLD_HEIGHT, camera constants, TIER_COSTS, STARTING_CASH, STARTING_GOODS, STARTING_INFLUENCE), `units.ts` (UnitType, UNIT_DEFS), `buildings.ts` (BuildingType), `families.ts` (FAMILIES, FamilyModifiers, DEFAULT_MODIFIERS), `MapSystem.ts`, `UnitSystem.ts`, `BuildingSystem.ts`, `CombatSystem.ts`, `EconomySystem.ts`, `LogisticsSystem.ts`, `TerritorySystem.ts`, `FogOfWarSystem.ts`, `Pathfinding.ts` (pathfinding), `EventBus.ts` (EventBus, GameEvents), `IsometricUtils.ts` (tileToWorld, worldToTile, isoDepth)
 
 **Events listened:** `UNIT_PRODUCED`, `TRANSPORT_GOODS`, `SQUAD_WIPED`
 
 **Events emitted:** `GAME_STARTED`, `GAME_OVER`, `MOVE_ORDER`, `ATTACK_ORDER`, `PRODUCE_UNIT`, `CAPTURE_ORDER`, `RETREAT_ORDER`, `TRANSPORT_GOODS`, `BUILDING_SELECTED`, `SELECTION_BOX`, `GAME_PAUSED`, `GAME_RESUMED`, `GAME_SPEED_CHANGED`
+
+**Family modifier data flow:** On `create()`, reads `selectedFamily` index from `this.registry`, looks up `FAMILIES[index].modifiers` to get the player's `FamilyModifiers`. Passes these to `combatSystem.setPlayerModifiers(0, mods)` and `economySystem.setPlayerModifiers(0, mods)`. Also applies `buildingHpMultiplier` directly to P0 building HP, and uses `unitCostMultiplier` / `trainTimeMultiplier` when producing units.
 
 #### `UIScene.ts`
 **Imports from:** `config.ts` (MAP_WIDTH, MAP_HEIGHT, PLAYER_COLORS, TIER_COSTS, STARTING_CASH, STARTING_GOODS, STARTING_INFLUENCE), `units.ts` (UnitType, UNIT_DEFS), `EventBus.ts` (EventBus, GameEvents), `IsometricUtils.ts` (tileToWorld, worldToTile)
