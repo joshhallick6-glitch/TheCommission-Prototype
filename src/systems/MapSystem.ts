@@ -542,24 +542,32 @@ export class MapSystem {
   }
 
   /**
-   * Returns the interior tile rect {x0,y0,x1,y1} for a sub-block starting
-   * at (bx, by), skipping road and sidewalk tiles.
+   * Returns the bounding box {x0,y0,x1,y1} of WALL tiles within a sub-block
+   * starting at (bx, by). Scans all tiles in the 8x8 region and finds the
+   * tightest rectangle enclosing all WALL tiles.
    */
   private getBlockInterior(
     bx: number,
     by: number,
   ): { x0: number; y0: number; x1: number; y1: number } | null {
-    // Scan inward from (bx, by) to find first non-road/sidewalk tile
-    let x0 = bx;
-    let y0 = by;
-    let x1 = Math.min(bx + 7, MAP_WIDTH - 1);
-    let y1 = Math.min(by + 7, MAP_HEIGHT - 1);
+    const endX = Math.min(bx + 7, MAP_WIDTH - 1);
+    const endY = Math.min(by + 7, MAP_HEIGHT - 1);
 
-    // Expand x0 past roads/sidewalks
-    while (x0 <= x1 && this.isTileRoadOrSidewalk(x0, by)) x0++;
-    while (x1 >= x0 && this.isTileRoadOrSidewalk(x1, by)) x1--;
-    while (y0 <= y1 && this.isTileRoadOrSidewalk(bx, y0)) y0++;
-    while (y1 >= y0 && this.isTileRoadOrSidewalk(bx, y1)) y1--;
+    let x0 = endX + 1;
+    let y0 = endY + 1;
+    let x1 = bx - 1;
+    let y1 = by - 1;
+
+    for (let yy = by; yy <= endY; yy++) {
+      for (let xx = bx; xx <= endX; xx++) {
+        if (this.grid[yy][xx] === TerrainType.WALL) {
+          if (xx < x0) x0 = xx;
+          if (xx > x1) x1 = xx;
+          if (yy < y0) y0 = yy;
+          if (yy > y1) y1 = yy;
+        }
+      }
+    }
 
     if (x0 > x1 || y0 > y1) return null;
     return { x0, y0, x1, y1 };

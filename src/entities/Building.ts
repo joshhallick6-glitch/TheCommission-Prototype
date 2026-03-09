@@ -87,7 +87,7 @@ export class Building {
     this.pixelY = centerPos.y;
     // Approximate bounding box in iso space for bars/borders
     this.pixelW = this.stats.widthTiles * TILE_WIDTH;
-    this.pixelH = this.stats.heightTiles * TILE_HEIGHT + 24; // +24 for wall height
+    this.pixelH = this.stats.heightTiles * TILE_HEIGHT + 24;
 
     // ── Main sprite (use isometric building texture from BootScene) ─────────
     const textureKey = `building-${type}`;

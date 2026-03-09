@@ -57,7 +57,7 @@ export const BUILDING_DEFS: Record<BuildingType, BuildingStats> = {
     garrisonSlots: 3,
     widthTiles: 4,
     heightTiles: 4,
-    color: 0xFFFFFF,
+    color: 0xD4C8B8,
     description: 'Main base. Produces all units. Stores goods.',
   },
   [BuildingType.SPEAKEASY]: {
@@ -77,7 +77,7 @@ export const BUILDING_DEFS: Record<BuildingType, BuildingStats> = {
     garrisonSlots: 1,
     widthTiles: 2,
     heightTiles: 2,
-    color: 0xAA00AA,
+    color: 0x8B6B5B,
     description: 'Income building. $20/min + minor Influence.',
   },
   [BuildingType.CORNER_STORE]: {
@@ -97,7 +97,7 @@ export const BUILDING_DEFS: Record<BuildingType, BuildingStats> = {
     garrisonSlots: 1,
     widthTiles: 2,
     heightTiles: 1,
-    color: 0x00AA00,
+    color: 0x7B8B6B,
     description: 'Cheapest income. Protection racket.',
   },
   [BuildingType.BACK_ALLEY_STILL]: {
@@ -117,7 +117,7 @@ export const BUILDING_DEFS: Record<BuildingType, BuildingStats> = {
     garrisonSlots: 0,
     widthTiles: 1,
     heightTiles: 2,
-    color: 0x884400,
+    color: 0x6B5B4B,
     description: 'Early goods source. 4 Goods/min.',
   },
   [BuildingType.BOOKIE_JOINT]: {
@@ -137,7 +137,7 @@ export const BUILDING_DEFS: Record<BuildingType, BuildingStats> = {
     garrisonSlots: 1,
     widthTiles: 2,
     heightTiles: 2,
-    color: 0x006688,
+    color: 0x5B7080,
     description: 'Cash income. Slight Influence.',
   },
   [BuildingType.WAREHOUSE]: {
@@ -157,7 +157,7 @@ export const BUILDING_DEFS: Record<BuildingType, BuildingStats> = {
     garrisonSlots: 2,
     widthTiles: 3,
     heightTiles: 2,
-    color: 0x666666,
+    color: 0x6B6B6B,
     description: 'Stores goods. Secondary processing hub.',
   },
   [BuildingType.BOXING_GYM]: {
@@ -177,7 +177,7 @@ export const BUILDING_DEFS: Record<BuildingType, BuildingStats> = {
     garrisonSlots: 0,
     widthTiles: 2,
     heightTiles: 2,
-    color: 0xCC8800,
+    color: 0x8B7B5B,
     description: 'High Influence. Melee damage aura.',
   },
   [BuildingType.NIGHTCLUB]: {
@@ -197,7 +197,7 @@ export const BUILDING_DEFS: Record<BuildingType, BuildingStats> = {
     garrisonSlots: 1,
     widthTiles: 3,
     heightTiles: 2,
-    color: 0xDD00DD,
+    color: 0x7B5B7B,
     description: 'Major cash earner. $35/min.',
   },
   [BuildingType.DISTILLERY]: {
@@ -217,7 +217,7 @@ export const BUILDING_DEFS: Record<BuildingType, BuildingStats> = {
     garrisonSlots: 0,
     widthTiles: 3,
     heightTiles: 3,
-    color: 0x886622,
+    color: 0x7B6B4B,
     description: 'Industrial goods. 10 Goods/min. Visible on minimap.',
   },
   [BuildingType.TRUCKING_DEPOT]: {
@@ -237,7 +237,7 @@ export const BUILDING_DEFS: Record<BuildingType, BuildingStats> = {
     garrisonSlots: 0,
     widthTiles: 3,
     heightTiles: 2,
-    color: 0x998866,
+    color: 0x8B8070,
     description: 'Spawns Delivery Trucks. +50% transport in radius.',
   },
   [BuildingType.PAWN_SHOP]: {
@@ -257,7 +257,7 @@ export const BUILDING_DEFS: Record<BuildingType, BuildingStats> = {
     garrisonSlots: 1,
     widthTiles: 2,
     heightTiles: 2,
-    color: 0x888844,
+    color: 0x7B7B5B,
     description: 'Dual income: cash + light goods.',
   },
   [BuildingType.CASINO]: {
@@ -277,7 +277,7 @@ export const BUILDING_DEFS: Record<BuildingType, BuildingStats> = {
     garrisonSlots: 2,
     widthTiles: 4,
     heightTiles: 3,
-    color: 0xFFD700,
+    color: 0xC8B87B,
     description: 'Top-tier cash. $60/min. High-value target.',
   },
   [BuildingType.IMPORT_DOCK]: {
@@ -297,7 +297,7 @@ export const BUILDING_DEFS: Record<BuildingType, BuildingStats> = {
     garrisonSlots: 0,
     widthTiles: 4,
     heightTiles: 3,
-    color: 0x4488AA,
+    color: 0x5B7B8B,
     description: 'Massive goods throughput. Waterfront only.',
   },
   [BuildingType.CITY_HALL_CONTACT]: {
@@ -317,7 +317,7 @@ export const BUILDING_DEFS: Record<BuildingType, BuildingStats> = {
     garrisonSlots: 1,
     widthTiles: 3,
     heightTiles: 3,
-    color: 0xCCCCCC,
+    color: 0xB8B0A8,
     description: 'Primary Influence engine. Unique limit: 1.',
   },
   [BuildingType.NEWSPAPER_OFFICE]: {
@@ -337,7 +337,7 @@ export const BUILDING_DEFS: Record<BuildingType, BuildingStats> = {
     garrisonSlots: 1,
     widthTiles: 2,
     heightTiles: 2,
-    color: 0xEEEEDD,
+    color: 0xC8C0B0,
     description: 'Influence generator. Smear Campaign ability.',
   },
 };

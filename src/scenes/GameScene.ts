@@ -1069,10 +1069,42 @@ export class GameScene extends Phaser.Scene {
    */
   private createCityBlockVisuals(): void {
     const blocks = this.mapSystem.detectCityBlocks();
-    for (const block of blocks) {
-      this.drawSkyscraper(block);
+
+    // Only LARGE buildings (area > 4 tiles) should replace a skyscraper.
+    // Small storefronts sit at the base of the skyscraper and coexist.
+    const largeBuildingTiles = new Set<string>();
+    if (this.buildingSystem) {
+      for (const b of this.buildingSystem.buildings.values()) {
+        const area = b.stats.widthTiles * b.stats.heightTiles;
+        if (area <= 4) continue; // small storefronts don't remove skyscrapers
+        const bw = b.stats.widthTiles;
+        const bh = b.stats.heightTiles;
+        for (let dy = 0; dy < bh; dy++) {
+          for (let dx = 0; dx < bw; dx++) {
+            largeBuildingTiles.add(`${b.tileX + dx},${b.tileY + dy}`);
+          }
+        }
+      }
     }
-    console.log(`GameScene: drew ${blocks.length} skyscraper visuals`);
+
+    let drawn = 0;
+    for (const block of blocks) {
+      let overlapsLarge = false;
+      outer:
+      for (let dy = 0; dy < block.heightTiles; dy++) {
+        for (let dx = 0; dx < block.widthTiles; dx++) {
+          if (largeBuildingTiles.has(`${block.tileX + dx},${block.tileY + dy}`)) {
+            overlapsLarge = true;
+            break outer;
+          }
+        }
+      }
+      if (!overlapsLarge) {
+        this.drawSkyscraper(block);
+        drawn++;
+      }
+    }
+    console.log(`GameScene: drew ${drawn}/${blocks.length} skyscraper visuals (${blocks.length - drawn} skipped for large buildings)`);
   }
 
   /**
@@ -1096,7 +1128,8 @@ export class GameScene extends Phaser.Scene {
     };
 
     // Vary building height based on block size + seeded randomness
-    const wallHeight = 40 + Math.floor(seededRand(1) * 50); // 40-90px
+    // Taller = more dramatic NYC skyscraper look
+    const wallHeight = 50 + Math.floor(seededRand(1) * 60); // 50-110px
 
     // NYC palette: grays, browns, brick, tan
     const colors = [
@@ -1105,9 +1138,7 @@ export class GameScene extends Phaser.Scene {
     ];
     const baseColor = colors[Math.floor(seededRand(2) * colors.length)];
 
-    // Compute the four diamond vertices of the block footprint.
-    // For a block at (tx, ty) with size (w, h), the diamond corners are
-    // derived from the outermost tile centers offset by half-tile.
+    // Compute the four diamond vertices of the block footprint (ground level).
     const tx = block.tileX;
     const ty = block.tileY;
     const w = block.widthTiles;
@@ -1125,7 +1156,7 @@ export class GameScene extends Phaser.Scene {
     const leftCenter = tileToWorld(tx, ty + h - 1);
     const leftVertex = { x: leftCenter.x - HALF_W, y: leftCenter.y };
 
-    // Color shading helpers (inline to avoid importing BootScene utilities)
+    // Color shading helpers
     const darken = (hex: number, factor: number): number => {
       const r = Math.floor(((hex >> 16) & 0xff) * factor);
       const g = Math.floor(((hex >> 8) & 0xff) * factor);
@@ -1141,34 +1172,37 @@ export class GameScene extends Phaser.Scene {
 
     const gfx = this.add.graphics();
 
-    // ── LEFT wall (medium shade) ──────────────────────────────────────
-    // Quad from left→bottom→(bottom shifted down)→(left shifted down)
+    // Buildings rise UPWARD: walls go from ground level to roof (y - wallHeight).
+    // Only the south-facing walls (left and right) are visible from the
+    // isometric camera angle.
+
+    // ── LEFT wall (south-west face, medium shade) ─────────────────────
     gfx.fillStyle(baseColor, 1);
     gfx.beginPath();
-    gfx.moveTo(leftVertex.x, leftVertex.y);
-    gfx.lineTo(bottomVertex.x, bottomVertex.y);
-    gfx.lineTo(bottomVertex.x, bottomVertex.y + wallHeight);
-    gfx.lineTo(leftVertex.x, leftVertex.y + wallHeight);
+    gfx.moveTo(leftVertex.x, leftVertex.y);                      // ground left
+    gfx.lineTo(bottomVertex.x, bottomVertex.y);                  // ground bottom
+    gfx.lineTo(bottomVertex.x, bottomVertex.y - wallHeight);     // roof bottom
+    gfx.lineTo(leftVertex.x, leftVertex.y - wallHeight);         // roof left
     gfx.closePath();
     gfx.fillPath();
 
-    // ── RIGHT wall (darker shade) ─────────────────────────────────────
+    // ── RIGHT wall (south-east face, darker shade) ────────────────────
     gfx.fillStyle(darken(baseColor, 0.65), 1);
     gfx.beginPath();
-    gfx.moveTo(rightVertex.x, rightVertex.y);
-    gfx.lineTo(bottomVertex.x, bottomVertex.y);
-    gfx.lineTo(bottomVertex.x, bottomVertex.y + wallHeight);
-    gfx.lineTo(rightVertex.x, rightVertex.y + wallHeight);
+    gfx.moveTo(bottomVertex.x, bottomVertex.y);                  // ground bottom
+    gfx.lineTo(rightVertex.x, rightVertex.y);                    // ground right
+    gfx.lineTo(rightVertex.x, rightVertex.y - wallHeight);       // roof right
+    gfx.lineTo(bottomVertex.x, bottomVertex.y - wallHeight);     // roof bottom
     gfx.closePath();
     gfx.fillPath();
 
-    // ── TOP face (lightest shade diamond) ─────────────────────────────
+    // ── ROOF (top face, lightest shade diamond, elevated) ─────────────
     gfx.fillStyle(lighten(baseColor, 0.35), 1);
     gfx.beginPath();
-    gfx.moveTo(topVertex.x, topVertex.y);
-    gfx.lineTo(rightVertex.x, rightVertex.y);
-    gfx.lineTo(bottomVertex.x, bottomVertex.y);
-    gfx.lineTo(leftVertex.x, leftVertex.y);
+    gfx.moveTo(topVertex.x, topVertex.y - wallHeight);
+    gfx.lineTo(rightVertex.x, rightVertex.y - wallHeight);
+    gfx.lineTo(bottomVertex.x, bottomVertex.y - wallHeight);
+    gfx.lineTo(leftVertex.x, leftVertex.y - wallHeight);
     gfx.closePath();
     gfx.fillPath();
 
@@ -1185,33 +1219,44 @@ export class GameScene extends Phaser.Scene {
     // ── Outlines ──────────────────────────────────────────────────────
     gfx.lineStyle(1, darken(baseColor, 0.4), 1);
 
-    // Top face outline
+    // Roof outline
     gfx.beginPath();
-    gfx.moveTo(topVertex.x, topVertex.y);
-    gfx.lineTo(rightVertex.x, rightVertex.y);
-    gfx.lineTo(bottomVertex.x, bottomVertex.y);
-    gfx.lineTo(leftVertex.x, leftVertex.y);
+    gfx.moveTo(topVertex.x, topVertex.y - wallHeight);
+    gfx.lineTo(rightVertex.x, rightVertex.y - wallHeight);
+    gfx.lineTo(bottomVertex.x, bottomVertex.y - wallHeight);
+    gfx.lineTo(leftVertex.x, leftVertex.y - wallHeight);
     gfx.closePath();
     gfx.strokePath();
 
     // Left wall outline
     gfx.beginPath();
     gfx.moveTo(leftVertex.x, leftVertex.y);
-    gfx.lineTo(leftVertex.x, leftVertex.y + wallHeight);
-    gfx.lineTo(bottomVertex.x, bottomVertex.y + wallHeight);
+    gfx.lineTo(leftVertex.x, leftVertex.y - wallHeight);
+    gfx.lineTo(bottomVertex.x, bottomVertex.y - wallHeight);
     gfx.lineTo(bottomVertex.x, bottomVertex.y);
     gfx.strokePath();
 
     // Right wall outline
     gfx.beginPath();
     gfx.moveTo(rightVertex.x, rightVertex.y);
-    gfx.lineTo(rightVertex.x, rightVertex.y + wallHeight);
-    gfx.lineTo(bottomVertex.x, bottomVertex.y + wallHeight);
+    gfx.lineTo(rightVertex.x, rightVertex.y - wallHeight);
+    gfx.lineTo(bottomVertex.x, bottomVertex.y - wallHeight);
     gfx.lineTo(bottomVertex.x, bottomVertex.y);
     gfx.strokePath();
 
-    // Depth: use the block's bottom tile position for correct iso sorting
-    gfx.setDepth(isoDepth(tx + w, ty + h, 1));
+    // Vertical edges at the three visible corners
+    gfx.beginPath();
+    gfx.moveTo(leftVertex.x, leftVertex.y);
+    gfx.lineTo(leftVertex.x, leftVertex.y - wallHeight);
+    gfx.moveTo(bottomVertex.x, bottomVertex.y);
+    gfx.lineTo(bottomVertex.x, bottomVertex.y - wallHeight);
+    gfx.moveTo(rightVertex.x, rightVertex.y);
+    gfx.lineTo(rightVertex.x, rightVertex.y - wallHeight);
+    gfx.strokePath();
+
+    // Depth: above tilemap (0), below units/buildings (10+), below fog (45).
+    // Use a small depth with tile-based offset for rough iso sorting.
+    gfx.setDepth(2 + (tx + ty + w + h) * 0.001);
   }
 
   /**
@@ -1239,15 +1284,11 @@ export class GameScene extends Phaser.Scene {
     const windowW = 5;         // window width (along the wall's direction)
     const windowH = 6;         // window height (vertical)
 
-    // Wall direction vector (top edge of the wall face)
+    // Wall direction vector (along the ground-level edge of the wall face)
     const dx = endV.x - startV.x;
     const dy = endV.y - startV.y;
     const wallLen = Math.sqrt(dx * dx + dy * dy);
     if (wallLen < windowSpacingH * 2) return; // too small for windows
-
-    // Normalize direction
-    const nx = dx / wallLen;
-    const ny = dy / wallLen;
 
     const cols = Math.max(1, Math.floor((wallLen - windowSpacingH) / windowSpacingH));
     const rows = Math.max(1, Math.floor((wallH - windowSpacingV) / windowSpacingV));
@@ -1256,9 +1297,10 @@ export class GameScene extends Phaser.Scene {
       for (let col = 0; col < cols; col++) {
         // Window position along the wall face
         const t = (col + 0.5) / cols; // 0..1 along wall
-        const yOff = windowSpacingV + row * windowSpacingV;
+        // Windows go UPWARD from ground level (negative Y)
+        const yOff = -(windowSpacingV + row * windowSpacingV);
 
-        // Base position at top of wall + offset along direction + offset down
+        // Base position at ground level + offset along direction + offset up
         const wx = startV.x + dx * t;
         const wy = startV.y + dy * t + yOff;
 
@@ -1267,7 +1309,6 @@ export class GameScene extends Phaser.Scene {
         const color = isLit ? 0xFFDD88 : 0x333333;
 
         gfx.fillStyle(color, isLit ? 0.8 : 0.5);
-        // Draw a small parallelogram following the wall's slant
         gfx.fillRect(
           wx - windowW / 2,
           wy - windowH / 2,

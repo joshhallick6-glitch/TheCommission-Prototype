@@ -374,95 +374,247 @@ export class BootScene extends Phaser.Scene {
       const def = BUILDING_DEFS[bType];
       if (!def) continue;
 
-      // Isometric diamond dimensions for this building
-      const isoW = def.widthTiles * TW;     // e.g. 2 tiles = 128px wide
-      const isoH = def.heightTiles * TH;    // e.g. 2 tiles = 64px tall
-      const halfW = isoW / 2;
-      const halfH = isoH / 2;
+      const area = def.widthTiles * def.heightTiles;
+      const isSmall = area <= 4; // storefronts: 1×1, 1×2, 2×1, 2×2
 
-      // Wall height in pixels (taller buildings get more wall depth)
-      const wallHeight = Math.max(24, Math.min(48, def.widthTiles * 12));
-
-      // Total sprite size: diamond + wall extension below
-      const spriteW = isoW;
-      const spriteH = isoH + wallHeight;
-
-      const gfx = this.make.graphics({ x: 0, y: 0 }, false);
-
-      // Diamond top-face corners (centered horizontally at halfW, top at 0)
-      const topX = halfW;
-      const topY = 0;
-      const rightX = isoW;
-      const rightY = halfH;
-      const bottomX = halfW;
-      const bottomY = isoH;
-      const leftX = 0;
-      const leftY = halfH;
-
-      // ── LEFT wall (medium shade) ──────────────────────────────────────
-      gfx.fillStyle(def.color, 1);
-      gfx.beginPath();
-      gfx.moveTo(leftX, leftY);
-      gfx.lineTo(bottomX, bottomY);
-      gfx.lineTo(bottomX, bottomY + wallHeight);
-      gfx.lineTo(leftX, leftY + wallHeight);
-      gfx.closePath();
-      gfx.fillPath();
-
-      // ── RIGHT wall (darker shade) ─────────────────────────────────────
-      gfx.fillStyle(darkenColor(def.color, 0.6), 1);
-      gfx.beginPath();
-      gfx.moveTo(rightX, rightY);
-      gfx.lineTo(bottomX, bottomY);
-      gfx.lineTo(bottomX, bottomY + wallHeight);
-      gfx.lineTo(rightX, rightY + wallHeight);
-      gfx.closePath();
-      gfx.fillPath();
-
-      // ── TOP face (lighter shade diamond) ──────────────────────────────
-      gfx.fillStyle(lightenColor(def.color, 0.3), 1);
-      gfx.beginPath();
-      gfx.moveTo(topX, topY);
-      gfx.lineTo(rightX, rightY);
-      gfx.lineTo(bottomX, bottomY);
-      gfx.lineTo(leftX, leftY);
-      gfx.closePath();
-      gfx.fillPath();
-
-      // ── Outlines ──────────────────────────────────────────────────────
-      gfx.lineStyle(1, darkenColor(def.color, 0.4), 1);
-
-      // Top face outline
-      gfx.beginPath();
-      gfx.moveTo(topX, topY);
-      gfx.lineTo(rightX, rightY);
-      gfx.lineTo(bottomX, bottomY);
-      gfx.lineTo(leftX, leftY);
-      gfx.closePath();
-      gfx.strokePath();
-
-      // Left wall outline
-      gfx.beginPath();
-      gfx.moveTo(leftX, leftY);
-      gfx.lineTo(leftX, leftY + wallHeight);
-      gfx.lineTo(bottomX, bottomY + wallHeight);
-      gfx.lineTo(bottomX, bottomY);
-      gfx.strokePath();
-
-      // Right wall outline
-      gfx.beginPath();
-      gfx.moveTo(rightX, rightY);
-      gfx.lineTo(rightX, rightY + wallHeight);
-      gfx.lineTo(bottomX, bottomY + wallHeight);
-      gfx.lineTo(bottomX, bottomY);
-      gfx.strokePath();
-
-      gfx.generateTexture(`building-${bType}`, spriteW, spriteH);
-      gfx.destroy();
-
-      // Stamp identifying label on the top face
-      this.addBuildingLabel(bType, spriteW, spriteH, halfW, halfH, def.color);
+      if (isSmall) {
+        this.generateStorefrontSprite(bType, def);
+      } else {
+        this.generateLargeBuildingSprite(bType, def);
+      }
     }
+  }
+
+  /**
+   * Small buildings (≤ 2×2): Low-profile storefront that sits at the base
+   * of a skyscraper. No tall walls or rooftop — just a ground-level facade
+   * with an awning and signage.
+   */
+  private generateStorefrontSprite(bType: string, def: typeof BUILDING_DEFS[BuildingType]): void {
+    const isoW = def.widthTiles * TW;
+    const isoH = def.heightTiles * TH;
+    const halfW = isoW / 2;
+    const halfH = isoH / 2;
+
+    // Short wall — just the storefront ground level, not a full building
+    const wallHeight = 14;
+    const spriteW = isoW;
+    const spriteH = isoH + wallHeight;
+
+    const gfx = this.make.graphics({ x: 0, y: 0 }, false);
+
+    // Diamond corners
+    const topX = halfW, topY = 0;
+    const rightX = isoW, rightY = halfH;
+    const bottomX = halfW, bottomY = isoH;
+    const leftX = 0, leftY = halfH;
+
+    // ── LEFT wall — awning/storefront face ──────────────────────────
+    gfx.fillStyle(def.color, 1);
+    gfx.beginPath();
+    gfx.moveTo(leftX, leftY);
+    gfx.lineTo(bottomX, bottomY);
+    gfx.lineTo(bottomX, bottomY + wallHeight);
+    gfx.lineTo(leftX, leftY + wallHeight);
+    gfx.closePath();
+    gfx.fillPath();
+
+    // Awning stripe across left wall (lighter band at top)
+    gfx.fillStyle(lightenColor(def.color, 0.3), 1);
+    gfx.beginPath();
+    gfx.moveTo(leftX, leftY);
+    gfx.lineTo(bottomX, bottomY);
+    gfx.lineTo(bottomX, bottomY + 5);
+    gfx.lineTo(leftX, leftY + 5);
+    gfx.closePath();
+    gfx.fillPath();
+
+    // ── RIGHT wall — darker storefront face ─────────────────────────
+    const rColor = darkenColor(def.color, 0.65);
+    gfx.fillStyle(rColor, 1);
+    gfx.beginPath();
+    gfx.moveTo(rightX, rightY);
+    gfx.lineTo(bottomX, bottomY);
+    gfx.lineTo(bottomX, bottomY + wallHeight);
+    gfx.lineTo(rightX, rightY + wallHeight);
+    gfx.closePath();
+    gfx.fillPath();
+
+    // Awning stripe on right wall
+    gfx.fillStyle(lightenColor(rColor, 0.3), 1);
+    gfx.beginPath();
+    gfx.moveTo(bottomX, bottomY);
+    gfx.lineTo(rightX, rightY);
+    gfx.lineTo(rightX, rightY + 5);
+    gfx.lineTo(bottomX, bottomY + 5);
+    gfx.closePath();
+    gfx.fillPath();
+
+    // ── TOP face — thin roof/canopy matching skyscraper tones ───────
+    // Use a dark muted shade so it blends with the skyscraper above
+    gfx.fillStyle(lightenColor(def.color, 0.15), 1);
+    gfx.beginPath();
+    gfx.moveTo(topX, topY);
+    gfx.lineTo(rightX, rightY);
+    gfx.lineTo(bottomX, bottomY);
+    gfx.lineTo(leftX, leftY);
+    gfx.closePath();
+    gfx.fillPath();
+
+    // ── Outlines ────────────────────────────────────────────────────
+    gfx.lineStyle(1, darkenColor(def.color, 0.35), 1);
+
+    // Top face outline
+    gfx.beginPath();
+    gfx.moveTo(topX, topY);
+    gfx.lineTo(rightX, rightY);
+    gfx.lineTo(bottomX, bottomY);
+    gfx.lineTo(leftX, leftY);
+    gfx.closePath();
+    gfx.strokePath();
+
+    // Left wall outline
+    gfx.beginPath();
+    gfx.moveTo(leftX, leftY);
+    gfx.lineTo(leftX, leftY + wallHeight);
+    gfx.lineTo(bottomX, bottomY + wallHeight);
+    gfx.lineTo(bottomX, bottomY);
+    gfx.strokePath();
+
+    // Right wall outline
+    gfx.beginPath();
+    gfx.moveTo(rightX, rightY);
+    gfx.lineTo(rightX, rightY + wallHeight);
+    gfx.lineTo(bottomX, bottomY + wallHeight);
+    gfx.lineTo(bottomX, bottomY);
+    gfx.strokePath();
+
+    gfx.generateTexture(`building-${bType}`, spriteW, spriteH);
+    gfx.destroy();
+
+    this.addBuildingLabel(bType, spriteW, spriteH, halfW, halfH, def.color);
+  }
+
+  /**
+   * Large buildings (> 2×2): Full 3D skyscraper-style box with windows,
+   * storefront accent, and tall walls. These replace the background
+   * skyscraper for their city block.
+   */
+  private generateLargeBuildingSprite(bType: string, def: typeof BUILDING_DEFS[BuildingType]): void {
+    const isoW = def.widthTiles * TW;
+    const isoH = def.heightTiles * TH;
+    const halfW = isoW / 2;
+    const halfH = isoH / 2;
+
+    // Tall walls with windows — these ARE the skyscraper for their block
+    const maxDim = Math.max(def.widthTiles, def.heightTiles);
+    const wallHeight = Math.max(45, Math.min(75, maxDim * 18));
+    const spriteW = isoW;
+    const spriteH = isoH + wallHeight;
+
+    const gfx = this.make.graphics({ x: 0, y: 0 }, false);
+
+    const topX = halfW, topY = 0;
+    const rightX = isoW, rightY = halfH;
+    const bottomX = halfW, bottomY = isoH;
+    const leftX = 0, leftY = halfH;
+
+    const accentH = 8;
+
+    // ── LEFT wall with windows ──────────────────────────────────────
+    gfx.fillStyle(def.color, 1);
+    gfx.beginPath();
+    gfx.moveTo(leftX, leftY);
+    gfx.lineTo(bottomX, bottomY);
+    gfx.lineTo(bottomX, bottomY + wallHeight);
+    gfx.lineTo(leftX, leftY + wallHeight);
+    gfx.closePath();
+    gfx.fillPath();
+
+    drawWallWindows(gfx, leftX, leftY, bottomX, bottomY, wallHeight, accentH, 0);
+
+    // Storefront accent stripe
+    gfx.fillStyle(lightenColor(def.color, 0.2), 0.9);
+    gfx.beginPath();
+    gfx.moveTo(leftX, leftY + wallHeight - accentH);
+    gfx.lineTo(bottomX, bottomY + wallHeight - accentH);
+    gfx.lineTo(bottomX, bottomY + wallHeight);
+    gfx.lineTo(leftX, leftY + wallHeight);
+    gfx.closePath();
+    gfx.fillPath();
+
+    // ── RIGHT wall with windows (darker) ────────────────────────────
+    const rColor = darkenColor(def.color, 0.65);
+    gfx.fillStyle(rColor, 1);
+    gfx.beginPath();
+    gfx.moveTo(rightX, rightY);
+    gfx.lineTo(bottomX, bottomY);
+    gfx.lineTo(bottomX, bottomY + wallHeight);
+    gfx.lineTo(rightX, rightY + wallHeight);
+    gfx.closePath();
+    gfx.fillPath();
+
+    drawWallWindows(gfx, bottomX, bottomY, rightX, rightY, wallHeight, accentH, 50);
+
+    // Storefront accent stripe
+    gfx.fillStyle(lightenColor(rColor, 0.2), 0.9);
+    gfx.beginPath();
+    gfx.moveTo(bottomX, bottomY + wallHeight - accentH);
+    gfx.lineTo(rightX, rightY + wallHeight - accentH);
+    gfx.lineTo(rightX, rightY + wallHeight);
+    gfx.lineTo(bottomX, bottomY + wallHeight);
+    gfx.closePath();
+    gfx.fillPath();
+
+    // ── TOP face ────────────────────────────────────────────────────
+    gfx.fillStyle(lightenColor(def.color, 0.35), 1);
+    gfx.beginPath();
+    gfx.moveTo(topX, topY);
+    gfx.lineTo(rightX, rightY);
+    gfx.lineTo(bottomX, bottomY);
+    gfx.lineTo(leftX, leftY);
+    gfx.closePath();
+    gfx.fillPath();
+
+    // ── Outlines ────────────────────────────────────────────────────
+    gfx.lineStyle(1, darkenColor(def.color, 0.35), 1);
+
+    gfx.beginPath();
+    gfx.moveTo(topX, topY);
+    gfx.lineTo(rightX, rightY);
+    gfx.lineTo(bottomX, bottomY);
+    gfx.lineTo(leftX, leftY);
+    gfx.closePath();
+    gfx.strokePath();
+
+    gfx.beginPath();
+    gfx.moveTo(leftX, leftY);
+    gfx.lineTo(leftX, leftY + wallHeight);
+    gfx.lineTo(bottomX, bottomY + wallHeight);
+    gfx.lineTo(bottomX, bottomY);
+    gfx.strokePath();
+
+    gfx.beginPath();
+    gfx.moveTo(rightX, rightY);
+    gfx.lineTo(rightX, rightY + wallHeight);
+    gfx.lineTo(bottomX, bottomY + wallHeight);
+    gfx.lineTo(bottomX, bottomY);
+    gfx.strokePath();
+
+    // Vertical edges
+    gfx.beginPath();
+    gfx.moveTo(leftX, leftY);
+    gfx.lineTo(leftX, leftY + wallHeight);
+    gfx.moveTo(bottomX, bottomY);
+    gfx.lineTo(bottomX, bottomY + wallHeight);
+    gfx.moveTo(rightX, rightY);
+    gfx.lineTo(rightX, rightY + wallHeight);
+    gfx.strokePath();
+
+    gfx.generateTexture(`building-${bType}`, spriteW, spriteH);
+    gfx.destroy();
+
+    this.addBuildingLabel(bType, spriteW, spriteH, halfW, halfH, def.color);
   }
 
   /**
@@ -603,6 +755,50 @@ export class BootScene extends Phaser.Scene {
 }
 
 // ─── Utility functions (module-private) ───────────────────────────────────────
+
+/**
+ * Draw a grid of windows on a wall face of a building texture.
+ * Windows are small rectangles placed along the isometric wall face.
+ */
+function drawWallWindows(
+  gfx: Phaser.GameObjects.Graphics,
+  sx: number, sy: number,       // start vertex (ground level)
+  ex: number, ey: number,       // end vertex (ground level)
+  wallH: number,                // wall height in pixels
+  accentH: number,              // storefront zone to skip at bottom
+  seedOff: number,              // seed offset for variety
+): void {
+  const dx = ex - sx;
+  const dy = ey - sy;
+  const wallLen = Math.sqrt(dx * dx + dy * dy);
+  if (wallLen < 18) return; // too narrow for windows
+
+  const spacingH = 10;
+  const spacingV = 9;
+  const winW = 4;
+  const winH = 5;
+
+  const cols = Math.max(1, Math.floor((wallLen - spacingH) / spacingH));
+  const usableH = wallH - accentH - spacingV;
+  const rows = Math.max(1, Math.floor(usableH / spacingV));
+
+  let seed = Math.floor(sx * 137 + sy * 73 + ex * 41 + seedOff);
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      const t = (col + 0.5) / cols;
+      const yOff = spacingV * 0.6 + row * spacingV;
+      const wx = sx + dx * t;
+      const wy = sy + dy * t + yOff;
+
+      // Simple LCG for deterministic lit/dark
+      seed = ((seed * 1103515245 + 12345) >>> 0) & 0x7fffffff;
+      const isLit = (seed % 100) > 30;
+
+      gfx.fillStyle(isLit ? 0xFFDD88 : 0x2A2A2A, isLit ? 0.6 : 0.4);
+      gfx.fillRect(wx - winW / 2, wy - winH / 2, winW, winH);
+    }
+  }
+}
 
 /** Darken a hex color by a factor (0 = black, 1 = unchanged). */
 function darkenColor(hex: number, factor: number): number {
