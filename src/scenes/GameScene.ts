@@ -100,6 +100,12 @@ export class GameScene extends Phaser.Scene {
   // ── Win condition guard ──────────────────────────────────────────
   private gameOver: boolean = false;
 
+  // ── Cached entity arrays (perf: avoid Array.from() per frame) ──
+  private cachedSquadsArray: any[] = [];
+  private cachedSquadsVersion: number = 0;
+  private cachedBuildingsArray: any[] = [];
+  private cachedBuildingsVersion: number = 0;
+
   // ── Family modifiers (player 0's selected family bonuses) ────────
   public familyModifiers: FamilyModifiers = DEFAULT_MODIFIERS;
 
@@ -1364,6 +1370,30 @@ export class GameScene extends Phaser.Scene {
   }
 
   // ═══════════════════════════════════════════════════════════════════════
+  // CACHED ENTITY ARRAYS (perf: avoid Array.from() allocations per frame)
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /** Returns a cached array of all squads. Rebuilds only when squads are added/removed. */
+  private getSquadsArray(): any[] {
+    const currentSize = this.unitSystem.squads.size;
+    if (currentSize !== this.cachedSquadsVersion) {
+      this.cachedSquadsArray = Array.from(this.unitSystem.squads.values());
+      this.cachedSquadsVersion = currentSize;
+    }
+    return this.cachedSquadsArray;
+  }
+
+  /** Returns a cached array of all buildings. Rebuilds only when buildings are added/removed. */
+  private getBuildingsArray(): any[] {
+    const currentSize = this.buildingSystem.buildings.size;
+    if (currentSize !== this.cachedBuildingsVersion) {
+      this.cachedBuildingsArray = Array.from(this.buildingSystem.buildings.values());
+      this.cachedBuildingsVersion = currentSize;
+    }
+    return this.cachedBuildingsArray;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
   // UPDATE
   // ═══════════════════════════════════════════════════════════════════════
 
@@ -1401,8 +1431,8 @@ export class GameScene extends Phaser.Scene {
         (id: string) => this.unitSystem.squads.get(id) ?? null,
         (id: string) => this.buildingSystem.buildings.get(id) ?? null,
         (player: number, amount: number) => this.economySystem?.addGoods(player, amount),
-        () => Array.from(this.unitSystem.squads.values()),
-        () => Array.from(this.buildingSystem.buildings.values()),
+        () => this.getSquadsArray(),
+        () => this.getBuildingsArray(),
         this.time.now,
       );
     }
@@ -1419,8 +1449,8 @@ export class GameScene extends Phaser.Scene {
       this.fogOfWarSystem.update(
         scaledDelta,
         0, // player index (human player)
-        Array.from(this.unitSystem.squads.values()),
-        Array.from(this.buildingSystem.buildings.values()),
+        this.getSquadsArray(),
+        this.getBuildingsArray(),
         this.cameras.main,
       );
     }

@@ -22,6 +22,7 @@ MenuScene --> LobbyScene --> BootScene --> GameScene (+ UIScene overlay)
 **Data handoff between scenes:**
 - LobbyScene writes `this.registry.set('selectedFamily', index)` before starting BootScene.
 - BootScene reads nothing; it generates textures then starts GameScene.
+- GameScene reads `this.registry.get('selectedFamily')` to look up the player's `FamilyModifiers` from `FAMILIES[]`, then passes modifiers to CombatSystem and EconomySystem via `setPlayerModifiers()`.
 - GameScene launches UIScene; UIScene grabs a reference via `this.scene.get('GameScene')`.
 
 ---
@@ -189,6 +190,21 @@ Exports: `FamilyData` interface, `FamilyModifiers` interface, `DEFAULT_MODIFIERS
 
 **Events listened:** `CASH_CHANGED`, `GOODS_CHANGED`, `INFLUENCE_CHANGED`, `INCOME_TICK`, `UNIT_SELECTED`, `UNIT_DESELECTED`, `BUILDING_SELECTED`, `SELECTION_CLEARED`, `STANCE_CHANGED`, `BUILDING_CAPTURED`, `TRUCK_DESTROYED`, `GOODS_DELIVERED`, `TIER_ADVANCED`, `COMBAT_STARTED`, `SQUAD_WIPED`, `GAME_PAUSED`, `GAME_RESUMED`, `GAME_SPEED_CHANGED`, `UNIT_PRODUCED`, `TRANSPORT_GOODS`, `GAME_OVER`
 
+**Score tracking:** Maintains three score components displayed in the HUD:
+- `militaryScore` -- incremented by `100 + tier * 50` on each enemy `SQUAD_WIPED`.
+- `economyScore` -- set to total cash earned (updated from `INCOME_TICK` data).
+- `territoryScore` -- recalculated as `ownedBuildings.length * 50` (reads from BuildingSystem).
+- `getTotalScore()` returns the sum of all three.
+
+**Stat tracking (for game-over screen):** `unitsKilled`, `unitsLost`, `buildingsCaptured`, `totalCashEarned` -- accumulated via `SQUAD_WIPED`, `INCOME_TICK`, and `BUILDING_CAPTURED` events.
+
+**Game-over overlay:** When `GAME_OVER` fires, `showGameOverScreen()` renders a full-screen overlay at `UI_DEPTH + 50`:
+- Dark semi-transparent background (blocks input to the game below).
+- VICTORY (gold `#FFD700`) or DEFEAT (red `#FF0000`) header at 72px with reason text.
+- Stats panel showing: Military Score, Economy Score, Territory Score, Total Score, Game Time, Units Killed/Lost, Buildings Captured.
+- "RETURN TO MENU" button that calls `returnToMenu()` -- clears `EventBus`, stops GameScene + UIScene, starts MenuScene.
+- The `update()` loop early-returns when `gameOverShown` is true, freezing the HUD.
+
 ---
 
 ### 2e. Utilities (`src/utils/`)
@@ -271,7 +287,7 @@ Every event in `GameEvents`, who emits it, who listens, and the argument signatu
 
 | Event | Emitted by | Listened by | Arguments |
 |---|---|---|---|
-| `UNIT_DAMAGED` | `Squad.takeDamage()`, `CombatSystem` | (none currently) | `(squad/targetId, amount, [attackerId])` |
+| `UNIT_DAMAGED` | `CombatSystem` | (none currently) | `(targetId: string, amount: number, attackerId: string)` |
 | `UNIT_KILLED` | `CombatSystem` | (none currently) | `(targetId: string, attackerId: string)` |
 | `SQUAD_WIPED` | `Squad.die()` | `UnitSystem`, `GameScene`, `UIScene` | `(squad: Squad)` |
 | `COMBAT_STARTED` | `UnitSystem.attackWithSelected()`, `CombatSystem.engageTarget()` | `UIScene` | `(attackerSquads/attackerId, target/targetId)` |
@@ -345,8 +361,12 @@ Step  System/Action                        Why this order
  5    CombatSystem(scene)                  Needs a live reference to the unit
       combatSystem.setSquadLookup(         system's squad map so it can resolve
         unitSystem.squads)                 IDs to objects each tick.
+      combatSystem.setPlayerModifiers(     Injects family combat bonuses (DPS
+        0, familyModifiers)                multiplier, cover bonus) for player 0.
 
  6    EconomySystem(scene, playerCount=2)  Standalone; just needs scene + player count.
+      economySystem.setPlayerModifiers(    Injects family economy bonuses (cash
+        0, familyModifiers)                income multiplier) for player 0.
 
  7    LogisticsSystem(scene)               Standalone; callbacks are injected at
                                            update time, not construction.
@@ -529,11 +549,13 @@ Step  System.update(scaledDelta)          Dependencies & Notes
         |                                                    |
         |  +----------+  +-----------+  +--------+           |
         |  | Resource |  | Selection |  | Action |           |
-        |  | Bar      |  | Panel     |  | Bar    |           |
+        |  | Bar+Score|  | Panel     |  | Bar    |           |
         |  +----------+  +-----------+  +--------+           |
         |                                                    |
-        |  +----------+  +-----------+                       |
-        |  | Minimap  |  | Alerts    |                       |
+        |  +----------+  +-----------+  +-----------+        |
+        |  | Minimap  |  | Alerts    |  | Game Over |        |
+        |  +----------+  +-----------+  | Overlay   |        |
+        |                               +-----------+        |
         |  +----------+  +-----------+                       |
         +----------------------------------------------------+
 ```
@@ -548,6 +570,8 @@ Step  System.update(scaledDelta)          Dependencies & Notes
 6. **Buildings -> LogisticsSystem:** Goods accumulate at production buildings (`goodsStored`); trucks pick them up.
 7. **All Systems -> EventBus -> UIScene:** All resource changes, alerts, and state updates flow through events to the HUD.
 8. **FogOfWar -> Entities:** FogOfWarSystem directly sets `sprite.setVisible()` on enemy squads and buildings based on visibility state.
+9. **Registry -> GameScene -> Combat/Economy (family modifiers):** LobbyScene stores `selectedFamily` index in registry. GameScene reads it at create time, looks up `FAMILIES[index].modifiers`, then calls `combatSystem.setPlayerModifiers(0, mods)` and `economySystem.setPlayerModifiers(0, mods)`. These systems store per-player modifier maps and apply them during damage/income calculations.
+10. **Events -> UIScene (score tracking):** `SQUAD_WIPED` increments `militaryScore`, `INCOME_TICK` updates `economyScore` (total cash earned), and `BUILDING_CAPTURED` recalculates `territoryScore`. On `GAME_OVER`, UIScene displays the VICTORY/DEFEAT overlay.
 
 ---
 
@@ -575,8 +599,8 @@ Phaser's `make.tilemap({ data })` always creates an ORTHOGONAL map internally. M
 ### CombatSystem Reads Terrain via Scene Cast
 `CombatSystem.getTerrainAt()` reads terrain by casting `this.scene` to `any` and accessing `.tilemap`. GameScene sets `(this as any).tilemap = this.tilemap` in its create method to make this work.
 
-### Dual UNIT_DAMAGED Emission
-Both `Squad.takeDamage()` and `CombatSystem.resolveCombatTick()` emit `UNIT_DAMAGED` with different argument signatures. The Squad emits `(squad, amount)` while CombatSystem emits `(targetId, amount, attackerId)`. Any listener must handle both shapes.
+### UNIT_DAMAGED Emission
+`UNIT_DAMAGED` is emitted by `CombatSystem` with signature `(targetId, amount, attackerId)`. Squad's `takeDamage(amount, attacker?)` no longer emits `UNIT_DAMAGED` directly -- CombatSystem handles it with full context. The optional `attacker` parameter on `takeDamage()` is used internally by Squad for defensive stance behavior (fight-back targeting), not for event emission.
 
 ### Dual COMBAT_STARTED Emission
 Both `UnitSystem.attackWithSelected()` and `CombatSystem.engageTarget()` emit `COMBAT_STARTED` with different argument signatures. UnitSystem passes `(selectedSquads[], targetSquad)` while CombatSystem passes `(attackerId, targetId)`.
@@ -584,12 +608,13 @@ Both `UnitSystem.attackWithSelected()` and `CombatSystem.engageTarget()` emit `C
 ### Building.update() vs BuildingSystem.validateCaptures()
 Building.update() advances the production queue but does NOT advance capture progress. Capture is solely driven by `BuildingSystem.validateCaptures()`, which is called separately in GameScene.update() with a callback that counts nearby squads. This split exists so capture speed scales with squad proximity.
 
-### Fog of War Rendering is Optimized with Dirty Flags
-FogOfWarSystem recalculates the visibility grid only every 200ms (not every frame). The fog overlay is **not** redrawn every frame -- it uses a multi-layer dirty-flag system to skip unnecessary redraws:
+### Fog of War Rendering is Optimized with Dirty Flags and Viewport Culling
+FogOfWarSystem recalculates the visibility grid only every 200ms (not every frame). The fog overlay is **not** redrawn every frame -- it uses dirty flags and viewport culling to skip unnecessary work:
 
 1. **Dirty flag:** Set when `updateVisibility()` runs (every 200ms) or when `revealArea()`/`revealRect()`/`immediateUpdate()` are called.
 2. **Camera movement detection:** Tracks the last camera viewport position. The fog is redrawn only when the camera moves more than 1px (avoids sub-pixel jitter redraws).
-3. **Viewport snapshot comparison:** When the dirty flag fires but the camera hasn't moved, the system compares the current visibility values within the viewport against a saved snapshot. If nothing on-screen actually changed (e.g., no units moved into/out of sight), the redraw is skipped entirely.
+3. **Viewport culling:** When redrawing, only tiles within the current camera viewport are iterated and drawn -- off-screen tiles are skipped entirely. This limits iteration to the visible area rather than the full `MAP_WIDTH * MAP_HEIGHT` grid.
+4. **Viewport snapshot comparison:** When the dirty flag fires but the camera hasn't moved, the system compares the current visibility values within the viewport against a saved snapshot. If nothing on-screen actually changed (e.g., no units moved into/out of sight), the redraw is skipped entirely.
 
 When the camera is stationary and visibility hasn't changed, Phaser reuses the existing Graphics command buffer at zero additional cost -- no `clear()` + rebuild cycle. This eliminates the ~22,000 Graphics API calls per frame that previously ran on every frame.
 
@@ -615,3 +640,16 @@ Squads have a `stance` field (`UnitStance` type: `'aggressive' | 'defensive' | '
 - **Stand Ground**: Squads attack enemies in range but never chase. In `updateCombat()`, if the target moves out of weapon range, the squad drops the target and returns to `idle` instead of pathfinding toward the enemy. Squads can still be ordered to move; they move to the new position then resume standing ground.
 
 Stance is changed via `Squad.setStance()`, which emits `STANCE_CHANGED`. The UIScene action bar shows three stance buttons (A/D/S) when units are selected, with the active stance highlighted. Clicking a stance button sets it on all selected squads.
+
+---
+
+## 8. Performance Optimizations
+
+### UIScene: Production Queue Dirty Flag
+`updateProductionQueueUI()` is called every frame but uses a dirty-flag pattern to avoid destroying and recreating all text objects each frame. The `productionQueueDirty` flag is set by event listeners (`UNIT_PRODUCED`, `BUILDING_SELECTED`, `SELECTION_CLEARED`) and when the queue length or selected building changes. When not dirty, only the progress percentage text and bar for the first (actively producing) item are updated, and only when the integer percentage changes. This reduces per-frame work from ~10+ Phaser text create/destroy cycles to at most 1 `setText()` and 1 Graphics redraw. Helper methods `clearProductionQueueUI()` and `rebuildProductionQueueUI()` handle teardown and full rebuild respectively.
+
+### UIScene: Resource Bar Value Caching
+`updateResourceBar()` is called every frame but caches the last displayed value for each text field (`lastDisplayedCash`, `lastDisplayedGoods`, etc.). `setText()` is only called when the integer-floored value actually changes. Since resource values typically change once per economy tick (every 1000ms) rather than every frame, this skips ~59 out of 60 `setText()` calls per second at 60 FPS. Each skipped `setText()` avoids an internal Phaser texture re-rendering cycle. The tier button affordability check is similarly cached via `lastDisplayedTierCanAfford`.
+
+### GameScene: Cached Entity Arrays
+`Array.from(this.unitSystem.squads.values())` and `Array.from(this.buildingSystem.buildings.values())` were called 2-3 times per frame (for fog of war and logistics system callbacks), allocating new arrays every frame. These are now cached via `getSquadsArray()` and `getBuildingsArray()` helper methods that track `Map.size` and only rebuild when entities are added or removed. Between changes, the same array reference is reused. This eliminates ~4 `Array.from()` allocations per frame during normal gameplay.

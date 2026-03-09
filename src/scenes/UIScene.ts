@@ -2069,29 +2069,187 @@ export class UIScene extends Phaser.Scene {
 
     // ── Game over ───────────────────────────────────────────────────────
     EventBus.on(GameEvents.GAME_OVER, (data: any) => {
-      const winner = data.winner === 0 ? 'VICTORY' : 'DEFEAT';
-      const color = data.winner === 0 ? '#FFD700' : '#FF0000';
-
-      // Show large centered text
-      const gameOverText = this.add.text(this.viewW / 2, this.viewH / 2, winner, {
-        fontSize: '64px',
-        fontFamily: FONT_FAMILY,
-        color,
-        fontStyle: 'bold',
-        stroke: '#000000',
-        strokeThickness: 4,
-      });
-      gameOverText.setOrigin(0.5, 0.5);
-      gameOverText.setDepth(UI_DEPTH + 10);
-
-      const reasonText = this.add.text(this.viewW / 2, this.viewH / 2 + 50, data.reason, {
-        fontSize: '18px',
-        fontFamily: FONT_FAMILY,
-        color: '#CCCCCC',
-      });
-      reasonText.setOrigin(0.5, 0.5);
-      reasonText.setDepth(UI_DEPTH + 10);
+      this.showGameOverScreen(data.winner, data.reason);
     });
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // GAME OVER SCREEN
+  // ═══════════════════════════════════════════════════════════════════════
+
+  private showGameOverScreen(winner: number, reason: string): void {
+    if (this.gameOverShown) return;
+    this.gameOverShown = true;
+
+    const cx = this.viewW / 2;
+    const cy = this.viewH / 2;
+    const overlayDepth = UI_DEPTH + 50;
+
+    // Dark semi-transparent overlay covering the full screen
+    const overlay = this.add.rectangle(cx, cy, this.viewW, this.viewH, 0x000000, 0.75);
+    overlay.setDepth(overlayDepth);
+    overlay.setInteractive(); // Block clicks from reaching the game
+    this.gameOverElements.push(overlay);
+
+    // Result text: VICTORY or DEFEAT
+    const isVictory = winner === 0;
+    const resultLabel = isVictory ? 'VICTORY' : 'DEFEAT';
+    const resultColor = isVictory ? '#FFD700' : '#FF0000';
+
+    const resultText = this.add.text(cx, cy - 200, resultLabel, {
+      fontSize: '72px',
+      fontFamily: 'Georgia, "Times New Roman", serif',
+      color: resultColor,
+      fontStyle: 'bold',
+      stroke: '#000000',
+      strokeThickness: 6,
+    });
+    resultText.setOrigin(0.5, 0.5);
+    resultText.setDepth(overlayDepth + 1);
+    this.gameOverElements.push(resultText);
+
+    // Reason text
+    const reasonText = this.add.text(cx, cy - 140, reason, {
+      fontSize: '18px',
+      fontFamily: FONT_FAMILY,
+      color: '#CCCCCC',
+    });
+    reasonText.setOrigin(0.5, 0.5);
+    reasonText.setDepth(overlayDepth + 1);
+    this.gameOverElements.push(reasonText);
+
+    // Stats panel
+    const panelW = 420;
+    const panelH = 280;
+    const panelX = cx;
+    const panelY = cy + 20;
+
+    const panelBg = this.add.rectangle(panelX, panelY, panelW, panelH, 0x111111, 0.9);
+    panelBg.setStrokeStyle(2, 0x8B7355, 0.9);
+    panelBg.setDepth(overlayDepth + 1);
+    this.gameOverElements.push(panelBg);
+
+    const panelTitle = this.add.text(panelX, panelY - panelH / 2 + 20, 'MATCH STATISTICS', {
+      fontSize: '16px',
+      fontFamily: FONT_FAMILY,
+      color: '#8B7355',
+      fontStyle: 'bold',
+    });
+    panelTitle.setOrigin(0.5, 0.5);
+    panelTitle.setDepth(overlayDepth + 2);
+    this.gameOverElements.push(panelTitle);
+
+    const dividerGfx = this.add.graphics();
+    dividerGfx.lineStyle(1, 0x8B7355, 0.6);
+    dividerGfx.lineBetween(
+      panelX - panelW / 2 + 20, panelY - panelH / 2 + 35,
+      panelX + panelW / 2 - 20, panelY - panelH / 2 + 35,
+    );
+    dividerGfx.setDepth(overlayDepth + 2);
+    this.gameOverElements.push(dividerGfx);
+
+    // Format game time from timer
+    const totalSeconds = Math.floor(this.gameTimer / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    const timeStr = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+
+    // Stat rows
+    const statRows = [
+      { label: 'Military Score', value: this.formatScore(this.militaryScore), color: '#FF8888' },
+      { label: 'Economy Score', value: this.formatScore(this.economyScore), color: '#FFD700' },
+      { label: 'Territory Score', value: this.formatScore(this.territoryScore), color: '#6495ED' },
+      { label: 'Total Score', value: this.formatScore(this.getTotalScore()), color: '#FFFFFF' },
+      { label: '', value: '', color: '#000000' },
+      { label: 'Game Time', value: timeStr, color: '#88FF88' },
+      { label: 'Units Killed', value: String(this.unitsKilled), color: '#FF8888' },
+      { label: 'Units Lost', value: String(this.unitsLost), color: '#FF4444' },
+      { label: 'Buildings Captured', value: String(this.buildingsCaptured), color: '#00FF00' },
+    ];
+
+    const startY = panelY - panelH / 2 + 50;
+    const leftX = panelX - panelW / 2 + 30;
+    const rightX = panelX + panelW / 2 - 30;
+    const rowHeight = 24;
+
+    for (let i = 0; i < statRows.length; i++) {
+      const stat = statRows[i];
+      if (stat.label === '') continue;
+
+      const rowY = startY + i * rowHeight;
+
+      const labelText = this.add.text(leftX, rowY, stat.label, {
+        fontSize: '14px',
+        fontFamily: FONT_FAMILY,
+        color: '#AAAAAA',
+      });
+      labelText.setOrigin(0, 0.5);
+      labelText.setDepth(overlayDepth + 2);
+      this.gameOverElements.push(labelText);
+
+      const valueText = this.add.text(rightX, rowY, stat.value, {
+        fontSize: '14px',
+        fontFamily: FONT_FAMILY,
+        color: stat.color,
+        fontStyle: 'bold',
+      });
+      valueText.setOrigin(1, 0.5);
+      valueText.setDepth(overlayDepth + 2);
+      this.gameOverElements.push(valueText);
+
+      if (stat.label === 'Total Score') {
+        const totalDivider = this.add.graphics();
+        totalDivider.lineStyle(1, 0x555555, 0.5);
+        totalDivider.lineBetween(leftX, rowY - 12, rightX, rowY - 12);
+        totalDivider.setDepth(overlayDepth + 2);
+        this.gameOverElements.push(totalDivider);
+      }
+    }
+
+    // RETURN TO MENU button
+    const btnY = panelY + panelH / 2 + 40;
+    const btnW = 220;
+    const btnH = 44;
+
+    const btnBg = this.add.rectangle(cx, btnY, btnW, btnH, 0x1a1a1a, 0.95);
+    btnBg.setStrokeStyle(2, 0x8B7355, 0.9);
+    btnBg.setDepth(overlayDepth + 1);
+    btnBg.setInteractive({ useHandCursor: true });
+    this.gameOverElements.push(btnBg);
+
+    const btnLabel = this.add.text(cx, btnY, 'RETURN TO MENU', {
+      fontSize: '18px',
+      fontFamily: 'Georgia, "Times New Roman", serif',
+      color: '#DAA520',
+      fontStyle: 'bold',
+    });
+    btnLabel.setOrigin(0.5, 0.5);
+    btnLabel.setDepth(overlayDepth + 2);
+    this.gameOverElements.push(btnLabel);
+
+    btnBg.on('pointerover', () => {
+      btnBg.setStrokeStyle(2, 0xdaa520, 1);
+      btnLabel.setColor('#FFD700');
+    });
+    btnBg.on('pointerout', () => {
+      btnBg.setStrokeStyle(2, 0x8B7355, 0.9);
+      btnLabel.setColor('#DAA520');
+    });
+    btnBg.on('pointerdown', () => {
+      this.returnToMenu();
+    });
+  }
+
+  /** Clean up and return to the menu scene. */
+  private returnToMenu(): void {
+    for (const el of this.gameOverElements) {
+      el.destroy();
+    }
+    this.gameOverElements = [];
+    EventBus.clear();
+    this.scene.stop('GameScene');
+    this.scene.stop('UIScene');
+    this.scene.start('MenuScene');
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -2110,6 +2268,9 @@ export class UIScene extends Phaser.Scene {
   // ═══════════════════════════════════════════════════════════════════════
 
   update(time: number, delta: number): void {
+    // Skip normal updates if game-over screen is shown
+    if (this.gameOverShown) return;
+
     // Update resource bar display
     this.updateResourceBar();
 
@@ -2142,5 +2303,8 @@ export class UIScene extends Phaser.Scene {
     } else {
       this.gameSpeedText.setColor('#88FF88');
     }
+
+    // ── Score Display ───────────────────────────────────────────────────
+    this.updateScoreDisplay();
   }
 }
