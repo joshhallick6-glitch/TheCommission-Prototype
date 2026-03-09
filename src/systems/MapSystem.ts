@@ -1,6 +1,9 @@
 // ─── Map System ─────────────────────────────────────────────────────────────
 // Procedurally generates a 160x160 tile city map with 10 distinct
 // neighborhoods, roads, buildings, parks, water, and cover objects.
+// Produces NYC-style dense rectangular city blocks: solid WALL interiors
+// with streets forming a connected grid. Claimable storefront buildings
+// are carved into block edges, facing the road.
 // Provides the Phaser tilemap (isometric), terrain queries, and pathfinding grids.
 
 import Phaser from 'phaser';
@@ -100,12 +103,12 @@ export class MapSystem {
 
   // ── Grid initialisation ─────────────────────────────────────────────────
 
-  /** Fill the entire grid with BUILDING_FLOOR as a base. */
+  /** Fill the entire grid with WALL as a base — blocks are solid by default. */
   private initGrid(): void {
     this.grid = [];
     for (let y = 0; y < MAP_HEIGHT; y++) {
       this.grid[y] = new Array<TerrainType>(MAP_WIDTH).fill(
-        TerrainType.BUILDING_FLOOR,
+        TerrainType.WALL,
       );
     }
   }
@@ -243,7 +246,11 @@ export class MapSystem {
     return result;
   }
 
-  /** Place capturable buildings within neighborhoods. Returns placements. */
+  /**
+   * Place capturable buildings as storefronts on the edges of city blocks.
+   * Buildings are carved out of solid WALL blocks, creating BUILDING_FLOOR
+   * interiors accessible from the adjacent street.
+   */
   placeBuildings(): BuildingPlacement[] {
     const placements: BuildingPlacement[] = [];
 
@@ -267,30 +274,33 @@ export class MapSystem {
     for (const hood of NEIGHBORHOODS) {
       const owner = hood.name === 'P1 Start' ? 0 : hood.name === 'P2 Start' ? 1 : -1;
 
-      // Find road intersections inside this neighborhood
-      const intersections = this.findRoadIntersections(
+      // Find block-edge storefront candidates inside this neighborhood
+      const edgeSpots = this.findBlockEdgeSpots(
         hood.x,
         hood.y,
         hood.w,
         hood.h,
       );
 
-      // Shuffle and pick placement spots
-      this.rng.shuffle(intersections);
+      // Shuffle candidates for variety
+      this.rng.shuffle(edgeSpots);
 
       let placed = 0;
       // Dense urban feel: many buildings per neighborhood.
       // Player starts get 8 (compound + 7 others), neutral neighborhoods get 10-15.
       const maxBuildings = hood.name.startsWith('P') && owner >= 0 ? 8 : this.rng.int(10, 16);
 
-      // Player start gets a Compound first
+      // Player start gets a Compound first — placed at a block corner
+      // for maximum street exposure
       if (owner >= 0) {
         const compoundDef = BUILDING_DEFS[BuildingType.COMPOUND];
         // Place compound near center of the start neighborhood
         const cx = hood.x + Math.floor(hood.w / 2) - Math.floor(compoundDef.widthTiles / 2);
         const cy = hood.y + Math.floor(hood.h / 2) - Math.floor(compoundDef.heightTiles / 2);
-        // Snap to nearest clear spot
-        const spot = this.findClearSpot(cx, cy, compoundDef.widthTiles, compoundDef.heightTiles, 6);
+        // Search with a wider radius to find a block-corner spot
+        const spot = this.findBlockEdgeClearSpot(
+          cx, cy, compoundDef.widthTiles, compoundDef.heightTiles, 10,
+        );
         if (spot) {
           placements.push({
             type: BuildingType.COMPOUND,
@@ -306,10 +316,11 @@ export class MapSystem {
       // Special: Waterfront gets import docks
       if (hood.name === 'The Waterfront') {
         const dockDef = BUILDING_DEFS[BuildingType.IMPORT_DOCK];
-        // Place 1-2 import docks near the water edge
-        for (let d = 0; d < 2 && intersections.length > 0; d++) {
-          const pt = intersections.pop()!;
-          const spot = this.findClearSpot(pt.x, pt.y, dockDef.widthTiles, dockDef.heightTiles, 4);
+        for (let d = 0; d < 2 && edgeSpots.length > 0; d++) {
+          const pt = edgeSpots.pop()!;
+          const spot = this.findBlockEdgeClearSpot(
+            pt.x, pt.y, dockDef.widthTiles, dockDef.heightTiles, 6,
+          );
           if (spot) {
             placements.push({
               type: BuildingType.IMPORT_DOCK,
@@ -324,10 +335,12 @@ export class MapSystem {
       }
 
       // Downtown gets a City Hall Contact
-      if (hood.name === 'Downtown' && intersections.length > 0) {
+      if (hood.name === 'Downtown' && edgeSpots.length > 0) {
         const chDef = BUILDING_DEFS[BuildingType.CITY_HALL_CONTACT];
-        const pt = intersections.pop()!;
-        const spot = this.findClearSpot(pt.x, pt.y, chDef.widthTiles, chDef.heightTiles, 4);
+        const pt = edgeSpots.pop()!;
+        const spot = this.findBlockEdgeClearSpot(
+          pt.x, pt.y, chDef.widthTiles, chDef.heightTiles, 6,
+        );
         if (spot) {
           placements.push({
             type: BuildingType.CITY_HALL_CONTACT,
@@ -340,19 +353,21 @@ export class MapSystem {
         }
       }
 
-      // Fill remaining slots with random neutral buildings.
+      // Fill remaining slots with random neutral buildings along block edges.
       // Cycle through the pool repeatedly so we can place many buildings
       // without being capped by the pool size.
       const shuffledPool = [...neutralPool];
       this.rng.shuffle(shuffledPool);
       let poolIdx = 0;
 
-      while (placed < maxBuildings && intersections.length > 0) {
+      while (placed < maxBuildings && edgeSpots.length > 0) {
         const bType = shuffledPool[poolIdx % shuffledPool.length];
         poolIdx++;
         const def = BUILDING_DEFS[bType];
-        const pt = intersections.pop()!;
-        const spot = this.findClearSpot(pt.x, pt.y, def.widthTiles, def.heightTiles, 6);
+        const pt = edgeSpots.pop()!;
+        const spot = this.findBlockEdgeClearSpot(
+          pt.x, pt.y, def.widthTiles, def.heightTiles, 8,
+        );
         if (spot) {
           placements.push({
             type: bType,
@@ -366,6 +381,7 @@ export class MapSystem {
       }
     }
 
+    console.log(`MapSystem: placed ${placements.length} buildings (target: 100-130)`);
     return placements;
   }
 
@@ -459,43 +475,17 @@ export class MapSystem {
   }
 
   /**
-   * Fill city blocks with WALL perimeter and BUILDING_FLOOR interior.
-   * A "block" is the interior area between roads/sidewalks.
+   * Fill city blocks with SOLID WALL. Every tile between roads/sidewalks
+   * that isn't already a road or sidewalk becomes impassable wall.
+   * This creates dense NYC-style blocks that units must path around
+   * via the street grid. Buildings are later carved into block edges.
    */
   private fillCityBlocks(): void {
-    // Identify rectangular interior regions by scanning between road lines.
-    // We walk through each major block (16x16 grid cells) and each sub-block
-    // (8x8 cells) and place walls along the inner perimeter.
-
-    for (let by = 0; by < MAP_HEIGHT; by += 8) {
-      for (let bx = 0; bx < MAP_WIDTH; bx += 8) {
-        // Find the interior rectangle of this sub-block
-        const interior = this.getBlockInterior(bx, by);
-        if (!interior) continue;
-
-        const { x0, y0, x1, y1 } = interior;
-        // Only stamp walls if the block is large enough (>= 3x3)
-        if (x1 - x0 < 3 || y1 - y0 < 3) continue;
-
-        for (let yy = y0; yy <= y1; yy++) {
-          for (let xx = x0; xx <= x1; xx++) {
-            // Skip if already road or sidewalk
-            if (
-              this.grid[yy][xx] === TerrainType.ROAD ||
-              this.grid[yy][xx] === TerrainType.SIDEWALK
-            ) {
-              continue;
-            }
-
-            const isPerimeter =
-              xx === x0 || xx === x1 || yy === y0 || yy === y1;
-            this.grid[yy][xx] = isPerimeter
-              ? TerrainType.WALL
-              : TerrainType.BUILDING_FLOOR;
-          }
-        }
-      }
-    }
+    // The grid was initialized to WALL, and layRoadGrid() placed ROAD
+    // and SIDEWALK tiles. Everything else is already WALL — so we just
+    // need to verify that no stray BUILDING_FLOOR tiles remain.
+    // (This is already satisfied since initGrid fills with WALL.)
+    // Nothing more to do here — blocks are solid by default.
   }
 
   /**
@@ -531,6 +521,7 @@ export class MapSystem {
   /**
    * Cut alleys through some building blocks. An alley is a 1-tile-wide
    * passable path that splits a block, allowing infantry shortcuts.
+   * Works with the new solid blocks by carving through WALL tiles.
    */
   private addAlleys(): void {
     // For roughly 25% of sub-blocks, cut a horizontal or vertical alley
@@ -561,7 +552,7 @@ export class MapSystem {
 
   /**
    * Place 2-3 small parks (8x8 tiles each) at random spots.
-   * These overwrite whatever is there (floor, walls).
+   * These overwrite whatever is there (wall, floor).
    */
   private addParks(): void {
     const parkCount = this.rng.int(2, 4);
@@ -683,38 +674,76 @@ export class MapSystem {
     }
   }
 
-  // ─── Intersection / placement helpers ───────────────────────────────────
+  // ─── Block-edge storefront placement helpers ──────────────────────────
 
   /**
-   * Find tiles inside a rectangle that sit at road intersections (where
-   * both the x and y position lie on road grid lines).
+   * Find WALL tiles on block edges that are adjacent to SIDEWALK or ROAD.
+   * These are candidate spots for storefront buildings to be carved into.
+   * Returns one candidate per cluster (thinned to avoid overlaps).
    */
-  private findRoadIntersections(
+  private findBlockEdgeSpots(
     rx: number,
     ry: number,
     rw: number,
     rh: number,
   ): { x: number; y: number }[] {
     const results: { x: number; y: number }[] = [];
-    for (let y = ry + 2; y < ry + rh - 2; y++) {
-      for (let x = rx + 2; x < rx + rw - 2; x++) {
+    for (let y = ry + 1; y < ry + rh - 1; y++) {
+      for (let x = rx + 1; x < rx + rw - 1; x++) {
         if (x >= MAP_WIDTH || y >= MAP_HEIGHT) continue;
-        if (this.grid[y][x] !== TerrainType.ROAD) continue;
-        // Check that there is road in both horizontal and vertical directions
-        const hRoad =
-          this.getTerrain(x - 1, y) === TerrainType.ROAD ||
-          this.getTerrain(x + 1, y) === TerrainType.ROAD;
-        const vRoad =
-          this.getTerrain(x, y - 1) === TerrainType.ROAD ||
-          this.getTerrain(x, y + 1) === TerrainType.ROAD;
-        if (hRoad && vRoad) {
-          results.push({ x, y });
+        if (this.grid[y][x] !== TerrainType.WALL) continue;
+
+        // Must be adjacent to a ROAD or SIDEWALK tile (i.e., on the block edge)
+        const adjStreet =
+          this.isStreetTile(x - 1, y) ||
+          this.isStreetTile(x + 1, y) ||
+          this.isStreetTile(x, y - 1) ||
+          this.isStreetTile(x, y + 1);
+        if (!adjStreet) continue;
+
+        results.push({ x, y });
+      }
+    }
+    // Thin out: keep at most one per 3x3 area to spread buildings out
+    return this.thinPoints(results, 3);
+  }
+
+  /** Check if a tile is a street-accessible tile (ROAD or SIDEWALK). */
+  private isStreetTile(x: number, y: number): boolean {
+    if (x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT) return false;
+    const t = this.grid[y][x];
+    return t === TerrainType.ROAD || t === TerrainType.SIDEWALK;
+  }
+
+  /**
+   * Search outward from (cx, cy) up to `radius` tiles for a spot where
+   * a building footprint of size (w x h) can be carved into a block edge.
+   * The footprint must be entirely WALL tiles, and at least one side
+   * must be adjacent to a ROAD or SIDEWALK tile.
+   */
+  private findBlockEdgeClearSpot(
+    cx: number,
+    cy: number,
+    w: number,
+    h: number,
+    radius: number,
+  ): { x: number; y: number } | null {
+    for (let r = 0; r <= radius; r++) {
+      for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          if (Math.abs(dx) !== r && Math.abs(dy) !== r && r > 0) continue;
+          const tx = cx + dx;
+          const ty = cy + dy;
+          if (this.canPlaceBuilding(tx, ty, w, h)) {
+            return { x: tx, y: ty };
+          }
         }
       }
     }
-    // Thin out: keep at most one per 4x4 area to avoid clusters
-    return this.thinPoints(results, 4);
+    return null;
   }
+
+  // ─── Intersection / placement helpers ───────────────────────────────────
 
   /**
    * Find major intersections: where two 2-tile major roads cross.
@@ -756,34 +785,10 @@ export class MapSystem {
   }
 
   /**
-   * Starting from (cx, cy), search outward up to `radius` tiles for a clear
-   * rectangular area of size (w x h) that is entirely BUILDING_FLOOR or ROAD
-   * adjacent. Returns the top-left corner or null.
-   */
-  private findClearSpot(
-    cx: number,
-    cy: number,
-    w: number,
-    h: number,
-    radius: number,
-  ): { x: number; y: number } | null {
-    for (let r = 0; r <= radius; r++) {
-      for (let dy = -r; dy <= r; dy++) {
-        for (let dx = -r; dx <= r; dx++) {
-          const tx = cx + dx;
-          const ty = cy + dy;
-          if (this.canPlaceBuilding(tx, ty, w, h)) {
-            return { x: tx, y: ty };
-          }
-        }
-      }
-    }
-    return null;
-  }
-
-  /**
    * Check whether a building footprint can be placed at (tx, ty).
-   * All tiles in the footprint must be BUILDING_FLOOR (not road, wall, water).
+   * All tiles in the footprint must be WALL (carving into a solid block).
+   * At least one edge of the footprint must be adjacent to a ROAD or
+   * SIDEWALK tile so the storefront faces a street.
    */
   private canPlaceBuilding(
     tx: number,
@@ -794,19 +799,54 @@ export class MapSystem {
     if (tx < 0 || ty < 0 || tx + w > MAP_WIDTH || ty + h > MAP_HEIGHT) {
       return false;
     }
+
+    // All footprint tiles must be WALL (solid block interior)
     for (let yy = ty; yy < ty + h; yy++) {
       for (let xx = tx; xx < tx + w; xx++) {
         const t = this.grid[yy][xx];
-        if (t !== TerrainType.BUILDING_FLOOR) return false;
+        if (t !== TerrainType.WALL) return false;
       }
     }
-    return true;
+
+    // At least one edge tile must be adjacent to ROAD or SIDEWALK
+    // Check all four sides of the footprint rectangle
+    let hasStreetAccess = false;
+
+    // Top edge (y = ty - 1)
+    if (ty > 0) {
+      for (let xx = tx; xx < tx + w && !hasStreetAccess; xx++) {
+        if (this.isStreetTile(xx, ty - 1)) hasStreetAccess = true;
+      }
+    }
+    // Bottom edge (y = ty + h)
+    if (!hasStreetAccess && ty + h < MAP_HEIGHT) {
+      for (let xx = tx; xx < tx + w && !hasStreetAccess; xx++) {
+        if (this.isStreetTile(xx, ty + h)) hasStreetAccess = true;
+      }
+    }
+    // Left edge (x = tx - 1)
+    if (!hasStreetAccess && tx > 0) {
+      for (let yy = ty; yy < ty + h && !hasStreetAccess; yy++) {
+        if (this.isStreetTile(tx - 1, yy)) hasStreetAccess = true;
+      }
+    }
+    // Right edge (x = tx + w)
+    if (!hasStreetAccess && tx + w < MAP_WIDTH) {
+      for (let yy = ty; yy < ty + h && !hasStreetAccess; yy++) {
+        if (this.isStreetTile(tx + w, yy)) hasStreetAccess = true;
+      }
+    }
+
+    return hasStreetAccess;
   }
 
   /**
-   * Mark a rectangular area as occupied by a building so future placements
-   * won't overlap. Sets perimeter to WALL and interior to BUILDING_FLOOR
-   * (matching the visual building block pattern).
+   * Carve a building footprint out of a solid block. Converts all
+   * footprint tiles from WALL to BUILDING_FLOOR, making that section
+   * walkable and enterable from the adjacent street.
+   *
+   * Also ensures a 1-tile SIDEWALK entry point exists between the
+   * storefront and the nearest road if one doesn't already exist.
    */
   private stampBuildingFootprint(
     tx: number,
@@ -814,11 +854,140 @@ export class MapSystem {
     w: number,
     h: number,
   ): void {
+    // Carve the interior — all tiles become BUILDING_FLOOR
     for (let yy = ty; yy < ty + h; yy++) {
       for (let xx = tx; xx < tx + w; xx++) {
-        const isEdge = xx === tx || xx === tx + w - 1 || yy === ty || yy === ty + h - 1;
-        this.grid[yy][xx] = isEdge ? TerrainType.WALL : TerrainType.BUILDING_FLOOR;
+        this.grid[yy][xx] = TerrainType.BUILDING_FLOOR;
       }
     }
+
+    // Ensure at least one entry point: find the side adjacent to a street
+    // and make sure there is a walkable connection. If the adjacent tile
+    // is WALL, convert it to SIDEWALK to create an entry.
+    this.ensureStorefrontEntry(tx, ty, w, h);
+  }
+
+  /**
+   * Ensure there is at least one walkable tile connecting the building
+   * footprint to the street network. Checks all four sides and converts
+   * an adjacent WALL tile to SIDEWALK if needed.
+   */
+  private ensureStorefrontEntry(
+    tx: number,
+    ty: number,
+    w: number,
+    h: number,
+  ): void {
+    // Check if any footprint edge tile already has a direct walkable
+    // neighbor (ROAD, SIDEWALK, ALLEY, or PARK)
+    const hasDirectAccess = this.footprintHasStreetAccess(tx, ty, w, h);
+    if (hasDirectAccess) return;
+
+    // No direct access — find the nearest WALL tile adjacent to both
+    // the footprint AND a street tile, and convert it to SIDEWALK
+    // Check top edge
+    if (ty > 0) {
+      for (let xx = tx; xx < tx + w; xx++) {
+        if (this.grid[ty - 1][xx] === TerrainType.WALL) {
+          // Check if this WALL tile is itself adjacent to a street
+          if (
+            this.isStreetTile(xx, ty - 2) ||
+            this.isStreetTile(xx - 1, ty - 1) ||
+            this.isStreetTile(xx + 1, ty - 1)
+          ) {
+            this.grid[ty - 1][xx] = TerrainType.SIDEWALK;
+            return;
+          }
+        }
+      }
+    }
+    // Check bottom edge
+    if (ty + h < MAP_HEIGHT) {
+      for (let xx = tx; xx < tx + w; xx++) {
+        if (this.grid[ty + h][xx] === TerrainType.WALL) {
+          if (
+            this.isStreetTile(xx, ty + h + 1) ||
+            this.isStreetTile(xx - 1, ty + h) ||
+            this.isStreetTile(xx + 1, ty + h)
+          ) {
+            this.grid[ty + h][xx] = TerrainType.SIDEWALK;
+            return;
+          }
+        }
+      }
+    }
+    // Check left edge
+    if (tx > 0) {
+      for (let yy = ty; yy < ty + h; yy++) {
+        if (this.grid[yy][tx - 1] === TerrainType.WALL) {
+          if (
+            this.isStreetTile(tx - 2, yy) ||
+            this.isStreetTile(tx - 1, yy - 1) ||
+            this.isStreetTile(tx - 1, yy + 1)
+          ) {
+            this.grid[yy][tx - 1] = TerrainType.SIDEWALK;
+            return;
+          }
+        }
+      }
+    }
+    // Check right edge
+    if (tx + w < MAP_WIDTH) {
+      for (let yy = ty; yy < ty + h; yy++) {
+        if (this.grid[yy][tx + w] === TerrainType.WALL) {
+          if (
+            this.isStreetTile(tx + w + 1, yy) ||
+            this.isStreetTile(tx + w, yy - 1) ||
+            this.isStreetTile(tx + w, yy + 1)
+          ) {
+            this.grid[yy][tx + w] = TerrainType.SIDEWALK;
+            return;
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Check if any tile immediately adjacent to the footprint (outside it)
+   * is a walkable street tile (ROAD, SIDEWALK, ALLEY, BUILDING_FLOOR).
+   */
+  private footprintHasStreetAccess(
+    tx: number,
+    ty: number,
+    w: number,
+    h: number,
+  ): boolean {
+    // Top edge
+    if (ty > 0) {
+      for (let xx = tx; xx < tx + w; xx++) {
+        if (this.isWalkableTile(xx, ty - 1)) return true;
+      }
+    }
+    // Bottom edge
+    if (ty + h < MAP_HEIGHT) {
+      for (let xx = tx; xx < tx + w; xx++) {
+        if (this.isWalkableTile(xx, ty + h)) return true;
+      }
+    }
+    // Left edge
+    if (tx > 0) {
+      for (let yy = ty; yy < ty + h; yy++) {
+        if (this.isWalkableTile(tx - 1, yy)) return true;
+      }
+    }
+    // Right edge
+    if (tx + w < MAP_WIDTH) {
+      for (let yy = ty; yy < ty + h; yy++) {
+        if (this.isWalkableTile(tx + w, yy)) return true;
+      }
+    }
+    return false;
+  }
+
+  /** Check if a tile is walkable (any terrain with finite infantry cost). */
+  private isWalkableTile(x: number, y: number): boolean {
+    if (x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT) return false;
+    return isFinite(TERRAIN_COSTS[this.grid[y][x]]);
   }
 }

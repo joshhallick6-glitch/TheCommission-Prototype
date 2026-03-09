@@ -285,7 +285,7 @@ export class Squad {
     }
   }
 
-  private updateCombat(dt: number): void {
+  private updateCombat(_dt: number): void {
     if (!this.attackTarget || this.attackTarget.hp <= 0) {
       this.attackTarget = null;
 
@@ -308,13 +308,21 @@ export class Squad {
     }
 
     if (this.isInRange(this.attackTarget)) {
-      // Deal damage: total squad DPS * delta
-      const totalDps = this.members * this.stats.dpsPerMember;
-      const veterancyMultiplier = 1 + this.veterancy * 0.1;
-      const damage = totalDps * veterancyMultiplier * dt;
-      this.attackTarget.takeDamage(damage);
+      // In range: stop moving and face the target.
+      // CombatSystem handles all damage via resolveCombatTick().
+      this.isMoving = false;
+      this.path = [];
+      this.pathIndex = 0;
+
+      // Face toward the target by flipping the sprite horizontally
+      const targetPos = tileToWorld(this.attackTarget.tileX, this.attackTarget.tileY);
+      if (targetPos.x < this.pixelPosX) {
+        this.sprite.setFlipX(true);
+      } else {
+        this.sprite.setFlipX(false);
+      }
     } else {
-      // Move toward target if out of range
+      // Out of range: move toward the target
       this.moveTo(this.attackTarget.tileX, this.attackTarget.tileY);
     }
   }

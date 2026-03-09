@@ -856,13 +856,35 @@ export class UIScene extends Phaser.Scene {
         this.selectionTexts.push(valText);
       }
 
-      // Carrying goods (if applicable)
+      // Carrying goods and route info (if applicable)
       if (stats.canCarryGoods) {
         const goodsText = this.add.text(infoX, statY + 40, `Cargo: ${squad.carryingGoods}/${stats.goodsCapacity} goods`, {
           fontSize: '11px', fontFamily: FONT_FAMILY, color: '#CD853F',
         });
         goodsText.setDepth(UI_DEPTH + 1);
         this.selectionTexts.push(goodsText);
+
+        // Show active route info if the carrier has one
+        const logisticsSystem = (this.gameScene as any)?.logisticsSystem;
+        const buildingSystem = (this.gameScene as any)?.buildingSystem;
+        if (logisticsSystem && buildingSystem) {
+          const route = logisticsSystem.getRouteForSquad(squad.id);
+          if (route) {
+            const sourceBldg = buildingSystem.buildings.get(route.sourceBuilding);
+            const destBldg = buildingSystem.buildings.get(route.destBuilding);
+            const sourceName = sourceBldg?.stats?.name ?? '???';
+            const destName = destBldg?.stats?.name ?? '???';
+            const stateLabel = route.state.replace('_', ' ').toUpperCase();
+
+            const routeText = this.add.text(
+              infoX, statY + 56,
+              `Route: ${sourceName} \u2192 ${destName}  [${stateLabel}]`,
+              { fontSize: '11px', fontFamily: FONT_FAMILY, color: '#88AAFF' },
+            );
+            routeText.setDepth(UI_DEPTH + 1);
+            this.selectionTexts.push(routeText);
+          }
+        }
       }
 
       // Description
@@ -1438,13 +1460,35 @@ export class UIScene extends Phaser.Scene {
         { icon: '\u25B2', name: 'Garrison', key: 'G', color: 0x4488CC, cb: () => gameScene?.handleGarrison?.() },
       ];
 
-      // Add route button if any carrier selected
-      const hasCarrier = selected.some((s: any) => s.stats.canCarryGoods);
-      if (hasCarrier) {
-        commands.push({
-          icon: '\u2192', name: 'Route', key: '', color: 0xCD853F,
-          cb: () => EventBus.emit(GameEvents.TRANSPORT_GOODS, null, selected.filter((s: any) => s.stats.canCarryGoods)),
-        });
+      // Add route/cancel-route button if any carrier selected
+      const carriers = selected.filter((s: any) => s.stats.canCarryGoods);
+      if (carriers.length > 0) {
+        const logisticsSystem = (this.gameScene as any)?.logisticsSystem;
+        const carriersWithRoutes = logisticsSystem
+          ? carriers.filter((s: any) => logisticsSystem.getRouteForSquad(s.id))
+          : [];
+
+        if (carriersWithRoutes.length > 0) {
+          // At least one carrier has an active route -- show Cancel Route
+          commands.push({
+            icon: '\u2716', name: 'Cancel', key: '', color: 0xFF4444,
+            cb: () => {
+              if (!logisticsSystem) return;
+              for (const carrier of carriersWithRoutes) {
+                const route = logisticsSystem.getRouteForSquad(carrier.id);
+                if (route) logisticsSystem.cancelRoute(route.id);
+              }
+              this.updateActionBar();
+              this.updateSelectionPanel();
+            },
+          });
+        } else {
+          // No active routes -- show Route hint (right-click a building to assign)
+          commands.push({
+            icon: '\u2192', name: 'Route', key: '', color: 0xCD853F,
+            cb: () => this.pushAlert('Right-click a building to set route', '#CD853F'),
+          });
+        }
       }
 
       for (let i = 0; i < commands.length; i++) {
@@ -1671,8 +1715,23 @@ export class UIScene extends Phaser.Scene {
       }
     });
 
-    EventBus.on(GameEvents.TRUCK_DESTROYED, () => {
-      this.pushAlert('Truck destroyed!', '#FF4444', true);
+    EventBus.on(GameEvents.TRUCK_DESTROYED, (data: any) => {
+      const owner = data?.owner ?? -1;
+      if (owner === 0) {
+        const goodsLost = data?.goodsLost ?? 0;
+        const msg = goodsLost > 0
+          ? `Truck destroyed! ${goodsLost} goods lost!`
+          : 'Truck destroyed!';
+        this.pushAlert(msg, '#FF4444', true);
+      }
+    });
+
+    EventBus.on(GameEvents.GOODS_DELIVERED, (data: any) => {
+      if (data?.player === 0) {
+        this.pushAlert(`+${data.amount} goods delivered`, '#CD853F');
+        // Refresh selection panel to update cargo display
+        this.updateSelectionPanel();
+      }
     });
 
     // EconomySystem emits: { player, newTier }
@@ -1716,6 +1775,13 @@ export class UIScene extends Phaser.Scene {
       const unitDef = UNIT_DEFS[data.unitType as keyof typeof UNIT_DEFS];
       const name = unitDef ? unitDef.name : data.unitType;
       this.pushAlert(`${name} trained!`, '#00FF00');
+    });
+
+    // ── Transport route created ─────────────────────────────────────────
+    EventBus.on(GameEvents.TRANSPORT_GOODS, () => {
+      // Refresh selection UI to show newly created routes
+      this.updateSelectionPanel();
+      this.updateActionBar();
     });
 
     // ── Minimap toggle ──────────────────────────────────────────────────

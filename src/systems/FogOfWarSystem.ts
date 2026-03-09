@@ -345,14 +345,17 @@ export class FogOfWarSystem {
       Math.max(topLeft.y, topRight.y, bottomLeft.y, bottomRight.y) + margin,
     );
 
-    // Helper to draw an isometric diamond at the given tile position
+    // Helper to draw an isometric diamond at the given tile position.
+    // Each vertex is expanded outward by 0.5px to eliminate sub-pixel gaps
+    // between adjacent diamonds that cause terrain bleed-through artifacts.
+    const expand = 0.5;
     const drawDiamond = (tx: number, ty: number): void => {
       const center = tileToWorld(tx, ty);
       this.fogGraphics.beginPath();
-      this.fogGraphics.moveTo(center.x, center.y - halfH); // top
-      this.fogGraphics.lineTo(center.x + halfW, center.y); // right
-      this.fogGraphics.lineTo(center.x, center.y + halfH); // bottom
-      this.fogGraphics.lineTo(center.x - halfW, center.y); // left
+      this.fogGraphics.moveTo(center.x, center.y - halfH - expand); // top
+      this.fogGraphics.lineTo(center.x + halfW + expand, center.y); // right
+      this.fogGraphics.lineTo(center.x, center.y + halfH + expand); // bottom
+      this.fogGraphics.lineTo(center.x - halfW - expand, center.y); // left
       this.fogGraphics.closePath();
       this.fogGraphics.fillPath();
     };

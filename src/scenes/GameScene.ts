@@ -22,6 +22,7 @@ import { UnitType, UNIT_DEFS } from '../data/units';
 import { MapSystem } from '../systems/MapSystem';
 import { UnitSystem } from '../systems/UnitSystem';
 import { BuildingSystem } from '../systems/BuildingSystem';
+import { BuildingType } from '../data/buildings';
 import { CombatSystem } from '../systems/CombatSystem';
 import { EconomySystem } from '../systems/EconomySystem';
 import { LogisticsSystem } from '../systems/LogisticsSystem';
@@ -212,6 +213,19 @@ export class GameScene extends Phaser.Scene {
         newSquad.moveTo(data.rallyPoint.x, data.rallyPoint.y);
       }
     });
+
+    // ── 10b. Listen for transport goods commands ───────────────────────
+    EventBus.on(
+      GameEvents.TRANSPORT_GOODS,
+      (data: { buildingId: string; squads: string[] }) =>
+        this.handleTransportGoods(data),
+    );
+
+    // ── 10c. Listen for squad wipes to handle goods carrier destruction ──
+    EventBus.on(
+      GameEvents.SQUAD_WIPED,
+      (squad: any) => this.handleSquadWipedLogistics(squad),
+    );
 
     // ── 11. Spawn starting units ────────────────────────────────────────
     this.spawnStartingUnits();
@@ -712,13 +726,106 @@ export class GameScene extends Phaser.Scene {
 
     if (carriers.length > 0) {
       // Transport route: move carriers to the building
-      EventBus.emit(GameEvents.TRANSPORT_GOODS, building.id, carriers);
+      EventBus.emit(GameEvents.TRANSPORT_GOODS, {
+        buildingId: building.id,
+        squads: carriers.map((s: any) => s.id),
+      });
     }
 
     // Move all selected units to the building
     const targetTileX = building.tileX + Math.floor(building.stats.widthTiles / 2);
     const targetTileY = building.tileY + building.stats.heightTiles;
     this.unitSystem.moveSelectedTo(targetTileX, targetTileY);
+  }
+
+  /**
+   * Handle the TRANSPORT_GOODS event. Determines source and destination
+   * buildings, then creates auto-repeating logistics routes for each carrier.
+   */
+  private handleTransportGoods(data: {
+    buildingId: string;
+    squads: string[];
+  }): void {
+    if (!this.logisticsSystem || !data) return;
+
+    const targetBuilding = this.buildingSystem.buildings.get(data.buildingId);
+    if (!targetBuilding) return;
+
+    const targetStats = targetBuilding.stats;
+    let sourceBuildingId: string | null = null;
+    let destBuildingId: string | null = null;
+
+    if (targetStats.goodsPerMin > 0) {
+      // The target building produces goods — it is the SOURCE.
+      // Auto-set the player's compound as the destination.
+      sourceBuildingId = data.buildingId;
+      const compound = this.buildingSystem.getCompound(0);
+      if (compound) {
+        destBuildingId = compound.id;
+      }
+    } else if (
+      targetStats.type === BuildingType.COMPOUND ||
+      targetStats.type === BuildingType.WAREHOUSE
+    ) {
+      // The target is a storage/destination building — find the nearest
+      // goods-producing building owned by the player as the source.
+      destBuildingId = data.buildingId;
+      const ownedBuildings = this.buildingSystem.getBuildingsByOwner(0);
+      let nearestDist = Infinity;
+
+      for (const b of ownedBuildings) {
+        if (b.stats.goodsPerMin <= 0) continue;
+        const dx = b.tileX - targetBuilding.tileX;
+        const dy = b.tileY - targetBuilding.tileY;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < nearestDist) {
+          nearestDist = dist;
+          sourceBuildingId = b.id;
+        }
+      }
+    }
+
+    // If we could not determine both endpoints, abort
+    if (!sourceBuildingId || !destBuildingId) return;
+
+    // Create a route for each carrier squad in the data
+    for (const squadId of data.squads) {
+      const squad = this.unitSystem.squads.get(squadId);
+      if (!squad || !squad.stats.canCarryGoods) continue;
+
+      // Cancel any existing route for this squad first
+      const existingRoute =
+        this.logisticsSystem.getRouteForSquad(squadId);
+      if (existingRoute) {
+        this.logisticsSystem.cancelRoute(existingRoute.id);
+      }
+
+      this.logisticsSystem.createRoute(
+        squadId,
+        sourceBuildingId,
+        destBuildingId,
+        squad.owner,
+        true, // autoRepeat
+      );
+    }
+  }
+
+  /**
+   * Handle SQUAD_WIPED for goods carriers — drop carried goods on destruction.
+   */
+  private handleSquadWipedLogistics(squad: any): void {
+    if (!this.logisticsSystem) return;
+    if (!squad || !squad.stats?.canCarryGoods) return;
+    if ((squad.carryingGoods ?? 0) <= 0) {
+      // No goods to drop, but still clean up the route
+      const route = this.logisticsSystem.getRouteForSquad(squad.id);
+      if (route) {
+        this.logisticsSystem.cancelRoute(route.id);
+      }
+      return;
+    }
+
+    this.logisticsSystem.onTruckDestroyed(squad.id, squad);
   }
 
   handleRetreat(): void {
