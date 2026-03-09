@@ -102,6 +102,9 @@ export const GameEvents = {
   // Production
   UNIT_PRODUCED: 'production:unit_produced',
 
+  // Stance
+  STANCE_CHANGED: 'unit:stance_changed',
+
   // Game state
   GAME_STARTED: 'game:started',
   GAME_OVER: 'game:over',

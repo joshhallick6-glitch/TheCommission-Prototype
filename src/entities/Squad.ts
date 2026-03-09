@@ -9,6 +9,9 @@ import { pathfinding } from '../utils/Pathfinding';
 import { EventBus, GameEvents } from '../utils/EventBus';
 import { tileToWorld, isoDepth, worldToTileFloat } from '../utils/IsometricUtils';
 
+/** Unit stance controlling automatic engagement and movement behavior. */
+export type UnitStance = 'aggressive' | 'defensive' | 'stand_ground';
+
 let squadCounter = 0;
 
 /** Callback set by UnitSystem so squads can scan for nearby enemies during attack-move. */
@@ -42,6 +45,10 @@ export class Squad {
   public isAttackMoving: boolean = false;
   /** Saved destination for attack-move resume after killing a target */
   private attackMoveDestination: { x: number; y: number } | null = null;
+  /** Unit stance: aggressive (auto-engage), defensive (fight back only), stand_ground (never chase) */
+  public stance: UnitStance = 'aggressive';
+  /** Saved position to return to after combat ends in defensive stance */
+  private defensiveReturnPosition: { x: number; y: number } | null = null;
   /** Guard to prevent flooding pathfinder with duplicate requests */
   public pendingPathRequest: boolean = false;
   private isDestroyed: boolean = false;
@@ -237,6 +244,24 @@ export class Squad {
       }
     }
 
+    // Aggressive stance auto-engage: scan for enemies while idle
+    if (this.stance === 'aggressive' && this.state === 'idle' && !this.isAttackMoving && enemyScanFn) {
+      const enemies = enemyScanFn(this, this.stats.sightRange);
+      if (enemies.length > 0) {
+        let closest = enemies[0];
+        let closestDist = this.distanceTo(closest);
+        for (let i = 1; i < enemies.length; i++) {
+          const d = this.distanceTo(enemies[i]);
+          if (d < closestDist) {
+            closestDist = d;
+            closest = enemies[i];
+          }
+        }
+        this.attackTarget = closest;
+        this.state = 'attacking';
+      }
+    }
+
     if (this.state === 'attacking' && this.attackTarget) {
       this.updateCombat(dt);
     }
@@ -303,6 +328,18 @@ export class Squad {
       if (this.isAttackMoving && this.attackMoveDestination) {
         this.state = 'moving';
         this.attackMoveTo(this.attackMoveDestination.x, this.attackMoveDestination.y);
+        this.defensiveReturnPosition = null;
+        return;
+      }
+
+      // Defensive stance: return to saved position after combat ends
+      if (this.stance === 'defensive' && this.defensiveReturnPosition) {
+        const returnPos = this.defensiveReturnPosition;
+        this.defensiveReturnPosition = null;
+        this.isAttackMoving = false;
+        this.attackMoveDestination = null;
+        this.state = 'moving';
+        this.moveTo(returnPos.x, returnPos.y);
         return;
       }
 
@@ -327,10 +364,27 @@ export class Squad {
       } else {
         this.sprite.setFlipX(false);
       }
+    } else if (this.stance === 'stand_ground') {
+      // Stand ground: never chase. If target is out of range, stop attacking.
+      this.attackTarget = null;
+      this.isMoving = false;
+      this.path = [];
+      this.pathIndex = 0;
+      this.state = 'idle';
     } else if (!this.isMoving && !this.pendingPathRequest) {
       // Out of range and not already moving/pathing: move toward the target
       this.moveTo(this.attackTarget.tileX, this.attackTarget.tileY);
     }
+  }
+
+  // ─── Stance ───────────────────────────────────────────────────────────────────
+
+  /** Change the unit's stance and emit a STANCE_CHANGED event. */
+  setStance(newStance: UnitStance): void {
+    if (this.stance === newStance) return;
+    this.stance = newStance;
+    this.defensiveReturnPosition = null;
+    EventBus.emit(GameEvents.STANCE_CHANGED, { squadId: this.id, stance: newStance });
   }
 
   // ─── Stop ─────────────────────────────────────────────────────────────────────
@@ -350,7 +404,7 @@ export class Squad {
 
   // ─── Damage & Death ─────────────────────────────────────────────────────────
 
-  takeDamage(amount: number): void {
+  takeDamage(amount: number, attacker?: Squad): void {
     this.hp = Math.max(0, this.hp - amount);
 
     // Recalculate living members based on remaining HP
@@ -359,6 +413,13 @@ export class Squad {
 
     // Note: UNIT_DAMAGED event is emitted by CombatSystem with full context
     // (target id, damage, attacker id) — not duplicated here.
+
+    // Defensive stance: fight back when attacked (if idle), and save position
+    if (this.stance === 'defensive' && attacker && attacker.hp > 0 && this.state === 'idle') {
+      this.defensiveReturnPosition = { x: this.tileX, y: this.tileY };
+      this.attackTarget = attacker;
+      this.state = 'attacking';
+    }
 
     if (this.hp <= 0) {
       this.die();

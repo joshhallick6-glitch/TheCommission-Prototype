@@ -143,6 +143,37 @@ export class UIScene extends Phaser.Scene {
   // ── Production Queue UI (Feature 1) ────────────────────────────────
   private productionQueueTexts: Phaser.GameObjects.Text[] = [];
   private productionProgressBar!: Phaser.GameObjects.Graphics;
+  private productionQueueDirty: boolean = true;
+  private productionQueueCachedLength: number = 0;
+  private productionQueueCachedBuildingId: string = '';
+  private productionProgressText: Phaser.GameObjects.Text | null = null;
+  private productionProgressCachedPct: number = -1;
+
+  // ── Resource bar caching (perf: skip setText when values unchanged) ──
+  private lastDisplayedCash: number = -1;
+  private lastDisplayedGoods: number = -1;
+  private lastDisplayedInfluence: number = -1;
+  private lastDisplayedIncomeRate: number = -1;
+  private lastDisplayedGoodsRate: number = -1;
+  private lastDisplayedInfluenceRate: number = -1;
+  private lastDisplayedTier: number = -1;
+  private lastDisplayedTierCanAfford: boolean | null = null;
+
+  // ── Score Tracking ────────────────────────────────────────────────
+  private militaryScore: number = 0;
+  private economyScore: number = 0;
+  private territoryScore: number = 0;
+  private scoreText!: Phaser.GameObjects.Text;
+
+  // ── Stat Tracking (for game-over screen) ──────────────────────────
+  private unitsKilled: number = 0;   // enemy squads wiped
+  private unitsLost: number = 0;     // own squads wiped
+  private buildingsCaptured: number = 0;
+  private totalCashEarned: number = 0;
+
+  // ── Game Over Overlay ─────────────────────────────────────────────
+  private gameOverShown: boolean = false;
+  private gameOverElements: Phaser.GameObjects.GameObject[] = [];
 
   constructor() {
     super({ key: 'UIScene' });
@@ -184,6 +215,7 @@ export class UIScene extends Phaser.Scene {
     this.createSelectionPanel();
     this.createActionBar();
     this.createTimerDisplay();
+    this.createScoreDisplay();
     this.createPauseOverlay();
     this.createProductionQueueUI();
 
@@ -242,9 +274,10 @@ export class UIScene extends Phaser.Scene {
     this.minimapBorder.setPosition(this.minimapX + MINIMAP_SIZE / 2, this.minimapY + MINIMAP_SIZE / 2);
     this.minimapTexture.setPosition(this.minimapX, this.minimapY);
 
-    // ── Timer and speed display (top bar area) ───────────────────────────
+    // ── Timer, speed, and score display (top bar area) ────────────────────
     this.timerText.setPosition(width / 2 + 180, textY);
     this.gameSpeedText.setPosition(width / 2 + 240, textY);
+    this.scoreText.setPosition(width / 2 + 320, textY);
 
     // ── Pause overlay (center of screen) ─────────────────────────────────
     this.pauseOverlay.setPosition(width / 2, height / 2);
@@ -1221,6 +1254,46 @@ export class UIScene extends Phaser.Scene {
   }
 
   // ═══════════════════════════════════════════════════════════════════════
+  // SCORE DISPLAY (top-right of resource bar, next to timer)
+  // ═══════════════════════════════════════════════════════════════════════
+
+  private createScoreDisplay(): void {
+    const textY = RESOURCE_BAR_HEIGHT / 2;
+
+    // Score text -- placed to the right of the game speed display, before tier info
+    this.scoreText = this.add.text(this.viewW / 2 + 320, textY, 'Score: 0', {
+      fontSize: '14px',
+      fontFamily: FONT_FAMILY,
+      color: '#FFFFFF',
+      fontStyle: 'bold',
+    });
+    this.scoreText.setOrigin(0.5, 0.5);
+    this.scoreText.setDepth(UI_DEPTH + 1);
+  }
+
+  private getTotalScore(): number {
+    return this.militaryScore + this.economyScore + this.territoryScore;
+  }
+
+  private formatScore(value: number): string {
+    return value.toLocaleString('en-US');
+  }
+
+  private updateScoreDisplay(): void {
+    this.scoreText.setText(`Score: ${this.formatScore(this.getTotalScore())}`);
+  }
+
+  /** Recalculate territory score based on current building ownership. */
+  private recalcTerritoryScore(): void {
+    const gameScene = this.gameScene as any;
+    const buildingSystem = gameScene?.buildingSystem;
+    if (!buildingSystem) return;
+
+    const ownedBuildings = buildingSystem.getBuildingsByOwner(0);
+    this.territoryScore = ownedBuildings.length * 50;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
   // PAUSE OVERLAY (Feature 4)
   // ═══════════════════════════════════════════════════════════════════════
 
@@ -1676,11 +1749,14 @@ export class UIScene extends Phaser.Scene {
     });
 
     // EconomySystem emits: { players: [{ player, cash, goods, influence, incomePerMin }] }
-    EventBus.on(GameEvents.INCOME_TICK, (data: { players: Array<{ player: number; incomePerMin: number }> }) => {
+    EventBus.on(GameEvents.INCOME_TICK, (data: { players: Array<{ player: number; cash: number; incomePerMin: number }> }) => {
       if (!data?.players) return;
       const p0 = data.players.find((p) => p.player === 0);
       if (p0) {
         this.incomeRate = p0.incomePerMin ?? 0;
+        // Track total cash earned for economy score
+        this.totalCashEarned = p0.cash ?? this.playerCash;
+        this.economyScore = Math.floor(this.totalCashEarned);
       }
       // Read goods/influence rates from EconomySystem
       const gameScene = this.scene.get('GameScene') as any;
@@ -1690,6 +1766,8 @@ export class UIScene extends Phaser.Scene {
         const econ = eco.getPlayerEconomy?.(0);
         this.influenceRate = econ?.influencePerMin ?? 0;
       }
+      // Recalculate territory score each tick
+      this.recalcTerritoryScore();
     });
 
     // ── Selection events ────────────────────────────────────────────────
@@ -1716,10 +1794,13 @@ export class UIScene extends Phaser.Scene {
     // ── Alert-generating events ─────────────────────────────────────────
     EventBus.on(GameEvents.BUILDING_CAPTURED, (data: any) => {
       if (data.newOwner === 0) {
+        this.buildingsCaptured++;
         this.pushAlert('Building captured!', '#00FF00');
       } else if (data.previousOwner === 0) {
         this.pushAlert('Building lost!', '#FF4444', true);
       }
+      // Recalculate territory score whenever building ownership changes
+      this.recalcTerritoryScore();
     });
 
     EventBus.on(GameEvents.TRUCK_DESTROYED, (data: any) => {
@@ -1756,8 +1837,17 @@ export class UIScene extends Phaser.Scene {
     });
 
     EventBus.on(GameEvents.SQUAD_WIPED, (squad: any) => {
-      if (squad && typeof squad === 'object' && squad.owner === 0) {
-        this.pushAlert('Squad wiped!', '#FF4444');
+      if (squad && typeof squad === 'object') {
+        if (squad.owner === 0) {
+          // Player lost a squad
+          this.unitsLost++;
+          this.pushAlert('Squad wiped!', '#FF4444');
+        } else {
+          // Player killed an enemy squad
+          this.unitsKilled++;
+          const tier = squad.stats?.tier ?? 1;
+          this.militaryScore += 100 + tier * 50;
+        }
       }
     });
 
