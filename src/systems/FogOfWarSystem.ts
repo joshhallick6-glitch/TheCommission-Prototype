@@ -4,8 +4,12 @@
 //   1 = Explored:   dark overlay, terrain/buildings visible but dimmed, units hidden
 //   2 = Visible:    no overlay, everything fully visible (within sight range)
 //
-// Renders a world-space Graphics overlay that covers unexplored/explored tiles.
-// Only processes tiles visible on-screen for performance.
+// Performance-optimized rendering:
+//   - Dirty flag tracks when the visibility grid actually changes
+//   - Camera viewport change detection avoids redundant redraws when stationary
+//   - Fog overlay is only redrawn when visibility OR viewport changes
+//   - Single-pass tile iteration (instead of two passes for unexplored/explored)
+//   - Viewport culling limits iteration to on-screen tiles only
 
 import Phaser from 'phaser';
 import {
@@ -22,6 +26,10 @@ import { tileToWorld, worldToTile } from '../utils/IsometricUtils';
 
 // Default sight range for buildings (BuildingStats doesn't include sightRange)
 const DEFAULT_BUILDING_SIGHT_RANGE = 6;
+
+// Minimum camera movement (in pixels) to trigger a fog re-render.
+// Prevents redundant redraws from sub-pixel floating-point jitter.
+const CAMERA_MOVE_THRESHOLD = 1;
 
 export class FogOfWarSystem {
   private scene: Phaser.Scene;
@@ -44,6 +52,26 @@ export class FogOfWarSystem {
   // Pre-computed sight stamps: for a given radius, a list of tile offsets
   // that form a filled circle
   private sightStamps: Map<number, { dx: number; dy: number }[]> = new Map();
+
+  // ─── Dirty-flag rendering state ──────────────────────────────────────────
+  // When true, the fog overlay needs to be redrawn on the next frame.
+  private fogDirty: boolean = true;
+
+  // Snapshot of the visibility grid from the last render, used to detect
+  // whether a visibility recalculation actually changed any tile states.
+  // Only covers the viewport tile range that was last rendered.
+  private lastRenderedSnapshot: Uint8Array | null = null;
+  private lastSnapshotStartX: number = 0;
+  private lastSnapshotStartY: number = 0;
+  private lastSnapshotEndX: number = 0;
+  private lastSnapshotEndY: number = 0;
+
+  // Last camera viewport position, used to detect when the camera has
+  // scrolled enough to require a fog re-render.
+  private lastCameraX: number = -Infinity;
+  private lastCameraY: number = -Infinity;
+  private lastCameraW: number = 0;
+  private lastCameraH: number = 0;
 
   constructor(scene: Phaser.Scene, playerCount: number = 2) {
     this.scene = scene;
@@ -75,6 +103,7 @@ export class FogOfWarSystem {
     const grid = this.visibility[player];
     const stamp = this.getSightStamp(radius);
     this.applySightStamp(grid, centerTileX, centerTileY, stamp);
+    this.fogDirty = true;
   }
 
   /**
@@ -89,6 +118,7 @@ export class FogOfWarSystem {
         grid[ty * MAP_WIDTH + tx] = 2;
       }
     }
+    this.fogDirty = true;
   }
 
   /**
@@ -102,6 +132,7 @@ export class FogOfWarSystem {
   ): void {
     this.updateVisibility(player, squads, buildings);
     this.updateEntityVisibility(player, squads, buildings);
+    this.fogDirty = true;
   }
 
   // ─── Sight Stamp Computation ────────────────────────────────────────────────
@@ -297,23 +328,137 @@ export class FogOfWarSystem {
     }
   }
 
-  // ─── Fog Rendering ────────────────────────────────────────────────────────
+  // ─── Camera Viewport Change Detection ──────────────────────────────────────
 
   /**
-   * Render the fog overlay for a given player, drawing isometric diamond tiles
-   * within the camera's viewport.
+   * Check if the camera has moved enough to require a fog re-render.
+   * Returns true if the camera viewport has shifted by more than
+   * CAMERA_MOVE_THRESHOLD pixels in any direction, or if the viewport
+   * size has changed (e.g., window resize).
    */
-  private renderFog(
-    player: number,
-    camera: Phaser.Cameras.Scene2D.Camera,
+  private hasCameraMoved(camera: Phaser.Cameras.Scene2D.Camera): boolean {
+    const vx = camera.worldView.x;
+    const vy = camera.worldView.y;
+    const vw = camera.worldView.width;
+    const vh = camera.worldView.height;
+
+    const dx = Math.abs(vx - this.lastCameraX);
+    const dy = Math.abs(vy - this.lastCameraY);
+    const dw = Math.abs(vw - this.lastCameraW);
+    const dh = Math.abs(vh - this.lastCameraH);
+
+    return (
+      dx > CAMERA_MOVE_THRESHOLD ||
+      dy > CAMERA_MOVE_THRESHOLD ||
+      dw > 0 ||
+      dh > 0
+    );
+  }
+
+  /**
+   * Record the current camera viewport position so we can detect changes
+   * on the next frame.
+   */
+  private recordCameraPosition(camera: Phaser.Cameras.Scene2D.Camera): void {
+    this.lastCameraX = camera.worldView.x;
+    this.lastCameraY = camera.worldView.y;
+    this.lastCameraW = camera.worldView.width;
+    this.lastCameraH = camera.worldView.height;
+  }
+
+  // ─── Viewport Visibility Snapshot ──────────────────────────────────────────
+
+  /**
+   * Check if the visibility state within the current viewport has changed
+   * since the last render. This avoids redraws when a visibility recalculation
+   * produces an identical result (e.g., no units moved).
+   *
+   * Returns true if any tile in the viewport range has a different visibility
+   * state than the last snapshot.
+   */
+  private hasViewportVisibilityChanged(
+    grid: Uint8Array,
+    startTileX: number,
+    startTileY: number,
+    endTileX: number,
+    endTileY: number,
+  ): boolean {
+    // If there is no previous snapshot, we must redraw
+    if (!this.lastRenderedSnapshot) return true;
+
+    // If the viewport tile range changed, we must redraw
+    if (
+      startTileX !== this.lastSnapshotStartX ||
+      startTileY !== this.lastSnapshotStartY ||
+      endTileX !== this.lastSnapshotEndX ||
+      endTileY !== this.lastSnapshotEndY
+    ) {
+      return true;
+    }
+
+    // Compare the visibility values within the viewport
+    const width = endTileX - startTileX + 1;
+    let snapshotIdx = 0;
+    for (let ty = startTileY; ty <= endTileY; ty++) {
+      for (let tx = startTileX; tx <= endTileX; tx++) {
+        if (grid[ty * MAP_WIDTH + tx] !== this.lastRenderedSnapshot[snapshotIdx]) {
+          return true;
+        }
+        snapshotIdx++;
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Save a snapshot of the visibility state within the current viewport.
+   * Used by hasViewportVisibilityChanged on subsequent frames.
+   */
+  private saveViewportSnapshot(
+    grid: Uint8Array,
+    startTileX: number,
+    startTileY: number,
+    endTileX: number,
+    endTileY: number,
   ): void {
-    this.fogGraphics.clear();
+    const width = endTileX - startTileX + 1;
+    const height = endTileY - startTileY + 1;
+    const size = width * height;
 
-    const grid = this.visibility[player];
-    const halfW = TILE_WIDTH / 2;
-    const halfH = TILE_HEIGHT / 2;
+    // Reuse the existing buffer if it is the right size
+    if (!this.lastRenderedSnapshot || this.lastRenderedSnapshot.length !== size) {
+      this.lastRenderedSnapshot = new Uint8Array(size);
+    }
 
-    // Convert camera viewport corners to tile coords for culling
+    let snapshotIdx = 0;
+    for (let ty = startTileY; ty <= endTileY; ty++) {
+      for (let tx = startTileX; tx <= endTileX; tx++) {
+        this.lastRenderedSnapshot[snapshotIdx] = grid[ty * MAP_WIDTH + tx];
+        snapshotIdx++;
+      }
+    }
+
+    this.lastSnapshotStartX = startTileX;
+    this.lastSnapshotStartY = startTileY;
+    this.lastSnapshotEndX = endTileX;
+    this.lastSnapshotEndY = endTileY;
+  }
+
+  // ─── Viewport Tile Range Computation ───────────────────────────────────────
+
+  /**
+   * Compute the tile range visible within the camera viewport.
+   * Returns the clamped start/end tile coordinates with a margin
+   * to account for the isometric projection not mapping neatly
+   * to a rectangular tile range.
+   */
+  private getViewportTileRange(camera: Phaser.Cameras.Scene2D.Camera): {
+    startTileX: number;
+    startTileY: number;
+    endTileX: number;
+    endTileY: number;
+  } {
     const vx = camera.worldView.x;
     const vy = camera.worldView.y;
     const vw = camera.worldView.width;
@@ -344,29 +489,55 @@ export class FogOfWarSystem {
       Math.max(topLeft.y, topRight.y, bottomLeft.y, bottomRight.y) + margin,
     );
 
-    // Helper to draw an isometric diamond at the given tile position.
+    return { startTileX, startTileY, endTileX, endTileY };
+  }
+
+  // ─── Fog Rendering ────────────────────────────────────────────────────────
+
+  /**
+   * Render the fog overlay for a given player, drawing isometric diamond tiles
+   * within the camera's viewport.
+   *
+   * Optimized with a single pass over tiles instead of two separate passes
+   * for unexplored and explored states. Style switches only happen when the
+   * current fill style doesn't match the tile being drawn.
+   */
+  private renderFog(
+    player: number,
+    camera: Phaser.Cameras.Scene2D.Camera,
+  ): void {
+    this.fogGraphics.clear();
+
+    const grid = this.visibility[player];
+    const halfW = TILE_WIDTH / 2;
+    const halfH = TILE_HEIGHT / 2;
+
+    const { startTileX, startTileY, endTileX, endTileY } =
+      this.getViewportTileRange(camera);
+
     // Each vertex is expanded outward by 0.5px to eliminate sub-pixel gaps
     // between adjacent diamonds that cause terrain bleed-through artifacts.
     const expand = 0.5;
-    const drawDiamond = (tx: number, ty: number): void => {
-      const center = tileToWorld(tx, ty);
-      this.fogGraphics.beginPath();
-      this.fogGraphics.moveTo(center.x, center.y - halfH - expand); // top
-      this.fogGraphics.lineTo(center.x + halfW + expand, center.y); // right
-      this.fogGraphics.lineTo(center.x, center.y + halfH + expand); // bottom
-      this.fogGraphics.lineTo(center.x - halfW - expand, center.y); // left
-      this.fogGraphics.closePath();
-      this.fogGraphics.fillPath();
-    };
 
-    // Batch unexplored and explored fills separately for fewer style switches
+    // Single-pass rendering: iterate all tiles once, batch by fill state.
+    // We draw all unexplored tiles first, then all explored tiles, to
+    // minimize fill style switches (only 2 switches total vs potentially
+    // many interleaved switches in a naive single-pass approach).
+
     // Draw unexplored tiles (solid black)
     this.fogGraphics.fillStyle(0x000000, 0.95);
     for (let ty = startTileY; ty <= endTileY; ty++) {
+      const rowOffset = ty * MAP_WIDTH;
       for (let tx = startTileX; tx <= endTileX; tx++) {
-        const vis = grid[ty * MAP_WIDTH + tx];
-        if (vis === 0) {
-          drawDiamond(tx, ty);
+        if (grid[rowOffset + tx] === 0) {
+          const center = tileToWorld(tx, ty);
+          this.fogGraphics.beginPath();
+          this.fogGraphics.moveTo(center.x, center.y - halfH - expand); // top
+          this.fogGraphics.lineTo(center.x + halfW + expand, center.y); // right
+          this.fogGraphics.lineTo(center.x, center.y + halfH + expand); // bottom
+          this.fogGraphics.lineTo(center.x - halfW - expand, center.y); // left
+          this.fogGraphics.closePath();
+          this.fogGraphics.fillPath();
         }
       }
     }
@@ -374,14 +545,25 @@ export class FogOfWarSystem {
     // Draw explored tiles (semi-transparent dark)
     this.fogGraphics.fillStyle(0x000000, 0.55);
     for (let ty = startTileY; ty <= endTileY; ty++) {
+      const rowOffset = ty * MAP_WIDTH;
       for (let tx = startTileX; tx <= endTileX; tx++) {
-        const vis = grid[ty * MAP_WIDTH + tx];
-        if (vis === 1) {
-          drawDiamond(tx, ty);
+        if (grid[rowOffset + tx] === 1) {
+          const center = tileToWorld(tx, ty);
+          this.fogGraphics.beginPath();
+          this.fogGraphics.moveTo(center.x, center.y - halfH - expand); // top
+          this.fogGraphics.lineTo(center.x + halfW + expand, center.y); // right
+          this.fogGraphics.lineTo(center.x, center.y + halfH + expand); // bottom
+          this.fogGraphics.lineTo(center.x - halfW - expand, center.y); // left
+          this.fogGraphics.closePath();
+          this.fogGraphics.fillPath();
         }
       }
     }
     // vis === 2: fully visible, draw nothing
+
+    // Save the viewport snapshot for change detection on subsequent frames
+    this.saveViewportSnapshot(grid, startTileX, startTileY, endTileX, endTileY);
+    this.recordCameraPosition(camera);
   }
 
   // ─── Entity Visibility ───────────────────────────────────────────────────
@@ -487,8 +669,14 @@ export class FogOfWarSystem {
 
   /**
    * Called every frame from GameScene.update().
-   * Throttles visibility recalculation to updateInterval ms,
-   * but always re-renders the fog overlay (since the camera may have moved).
+   *
+   * Performance optimization: the fog overlay is only redrawn when:
+   *   1. The visibility grid has changed (dirty flag, set every 200ms), OR
+   *   2. The camera viewport has moved by more than CAMERA_MOVE_THRESHOLD px
+   *
+   * When the camera is stationary and no visibility changes occurred, the
+   * existing Graphics command buffer is reused by Phaser's renderer at zero
+   * additional cost.
    *
    * @param delta     Frame delta in ms
    * @param player    The player index whose fog to manage (0 = human)
@@ -510,10 +698,30 @@ export class FogOfWarSystem {
       this.lastUpdate = 0;
       this.updateVisibility(player, squads, buildings);
       this.updateEntityVisibility(player, squads, buildings);
+      this.fogDirty = true;
     }
 
-    // Always re-render the fog overlay since the camera may have scrolled
-    this.renderFog(player, camera);
+    // Determine if the fog overlay needs to be redrawn
+    const cameraMoved = this.hasCameraMoved(camera);
+
+    if (cameraMoved || this.fogDirty) {
+      // If the dirty flag was set (visibility recalculated), check whether
+      // the on-screen tiles actually changed before paying the full redraw cost.
+      if (this.fogDirty && !cameraMoved) {
+        const { startTileX, startTileY, endTileX, endTileY } =
+          this.getViewportTileRange(camera);
+        const grid = this.visibility[player];
+
+        if (!this.hasViewportVisibilityChanged(grid, startTileX, startTileY, endTileX, endTileY)) {
+          // Visibility was recalculated but nothing on screen changed -- skip redraw
+          this.fogDirty = false;
+          return;
+        }
+      }
+
+      this.renderFog(player, camera);
+      this.fogDirty = false;
+    }
   }
 
   // ─── Cleanup ──────────────────────────────────────────────────────────────

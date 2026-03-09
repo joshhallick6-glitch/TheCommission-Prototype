@@ -136,7 +136,7 @@ export class CombatSystem {
       if (finalDamage > 0) {
         // Apply damage via squad API if available, otherwise reduce hp directly
         if (typeof target.takeDamage === 'function') {
-          target.takeDamage(finalDamage);
+          target.takeDamage(finalDamage, attacker);
         } else if (target.hp !== undefined) {
           target.hp = Math.max(0, target.hp - finalDamage);
         }
