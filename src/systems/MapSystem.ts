@@ -1,0 +1,790 @@
+// ─── Map System ─────────────────────────────────────────────────────────────
+// Procedurally generates a 160x160 tile city map with 10 distinct
+// neighborhoods, roads, buildings, parks, water, and cover objects.
+// Provides the Phaser tilemap, terrain queries, and pathfinding grids.
+
+import Phaser from 'phaser';
+import {
+  TILE_SIZE,
+  MAP_WIDTH,
+  MAP_HEIGHT,
+  TerrainType,
+  TERRAIN_COSTS,
+  VEHICLE_TERRAIN_COSTS,
+} from '../data/config';
+import { BuildingType, BUILDING_DEFS } from '../data/buildings';
+
+// ─── Public interfaces ──────────────────────────────────────────────────────
+
+export interface BuildingPlacement {
+  type: BuildingType;
+  tileX: number;
+  tileY: number;
+  owner: number; // -1 = neutral, 0 = P1, 1 = P2
+}
+
+export interface StreetCornerPlacement {
+  id: number;
+  tileX: number;
+  tileY: number;
+  neighborhood: string;
+}
+
+// ─── Neighborhood definitions ────────────────────────────────────────────────
+
+interface NeighborhoodDef {
+  name: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  color: number; // tint applied to road/sidewalk tiles
+}
+
+const NEIGHBORHOODS: NeighborhoodDef[] = [
+  { name: 'P1 Start', x: 0, y: 120, w: 40, h: 40, color: 0x442222 },
+  { name: 'P2 Start', x: 120, y: 0, w: 40, h: 40, color: 0x222244 },
+  { name: 'The Waterfront', x: 0, y: 0, w: 60, h: 20, color: 0x224444 },
+  { name: 'Downtown', x: 60, y: 60, w: 40, h: 40, color: 0x444422 },
+  { name: 'The Bottoms', x: 0, y: 60, w: 40, h: 40, color: 0x333322 },
+  { name: 'Entertainment Row', x: 100, y: 80, w: 40, h: 40, color: 0x442244 },
+  { name: 'The Heights', x: 60, y: 20, w: 50, h: 40, color: 0x334433 },
+  { name: 'Industrial', x: 0, y: 20, w: 40, h: 40, color: 0x3a3a2a },
+  { name: 'Market District', x: 100, y: 40, w: 40, h: 40, color: 0x443333 },
+  { name: 'Rail District', x: 120, y: 120, w: 40, h: 40, color: 0x3a3a3a },
+];
+
+// ─── Seeded PRNG (simple LCG for deterministic maps) ────────────────────────
+
+class SeededRandom {
+  private state: number;
+
+  constructor(seed: number = 42) {
+    this.state = seed;
+  }
+
+  /** Returns a float in [0, 1). */
+  next(): number {
+    this.state = (this.state * 1664525 + 1013904223) & 0xffffffff;
+    return (this.state >>> 0) / 0x100000000;
+  }
+
+  /** Returns an integer in [min, max). */
+  int(min: number, max: number): number {
+    return min + Math.floor(this.next() * (max - min));
+  }
+
+  /** Shuffle an array in place. */
+  shuffle<T>(arr: T[]): T[] {
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = this.int(0, i + 1);
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
+  }
+}
+
+// ─── MapSystem ──────────────────────────────────────────────────────────────
+
+export class MapSystem {
+  private scene: Phaser.Scene;
+  private grid: TerrainType[][] = []; // [y][x]
+  private rng: SeededRandom;
+
+  constructor(scene: Phaser.Scene, seed: number = 42) {
+    this.scene = scene;
+    this.rng = new SeededRandom(seed);
+    this.initGrid();
+  }
+
+  // ── Grid initialisation ─────────────────────────────────────────────────
+
+  /** Fill the entire grid with BUILDING_FLOOR as a base. */
+  private initGrid(): void {
+    this.grid = [];
+    for (let y = 0; y < MAP_HEIGHT; y++) {
+      this.grid[y] = new Array<TerrainType>(MAP_WIDTH).fill(
+        TerrainType.BUILDING_FLOOR,
+      );
+    }
+  }
+
+  // ── Public API ──────────────────────────────────────────────────────────
+
+  /** Generate the complete city. Call once before renderMap. */
+  generateCity(): void {
+    this.layRoadGrid();
+    this.fillCityBlocks();
+    this.addAlleys();
+    this.addParks();
+    this.addWaterAndBridges();
+    this.addCoverObjects();
+  }
+
+  /** Create and return a Phaser Tilemap from the generated grid data. */
+  renderMap(): Phaser.Tilemaps.Tilemap {
+    // Build raw tilemap data (2D array of tile indices matching TerrainType)
+    const mapData: number[][] = [];
+    for (let y = 0; y < MAP_HEIGHT; y++) {
+      mapData[y] = [];
+      for (let x = 0; x < MAP_WIDTH; x++) {
+        mapData[y][x] = this.grid[y][x]; // TerrainType enum === tile index
+      }
+    }
+
+    // Create tilemap from the 2D array
+    const tilemap = this.scene.make.tilemap({
+      data: mapData,
+      tileWidth: TILE_SIZE,
+      tileHeight: TILE_SIZE,
+    });
+
+    const tileset = tilemap.addTilesetImage(
+      'terrain',
+      'terrain-tileset',
+      TILE_SIZE,
+      TILE_SIZE,
+      0,
+      0,
+    );
+
+    if (!tileset) {
+      console.error('MapSystem: failed to create tileset');
+      return tilemap;
+    }
+
+    const layer = tilemap.createLayer(0, tileset, 0, 0);
+
+    if (layer) {
+      // Apply neighborhood tints to road and sidewalk tiles
+      this.applyNeighborhoodTints(layer);
+
+      // Mark collision tiles (walls, water, cover objects)
+      layer.setCollisionByExclusion([
+        TerrainType.ROAD,
+        TerrainType.SIDEWALK,
+        TerrainType.BUILDING_FLOOR,
+        TerrainType.ALLEY,
+        TerrainType.PARK,
+        TerrainType.BRIDGE,
+      ]);
+    }
+
+    return tilemap;
+  }
+
+  /** Get the terrain type at a tile coordinate. */
+  getTerrain(x: number, y: number): TerrainType {
+    if (x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT) {
+      return TerrainType.WATER; // out of bounds = impassable
+    }
+    return this.grid[y][x];
+  }
+
+  /** Check if a tile is passable for the given movement mode. */
+  isWalkable(x: number, y: number, isVehicle: boolean): boolean {
+    const terrain = this.getTerrain(x, y);
+    const costs = isVehicle ? VEHICLE_TERRAIN_COSTS : TERRAIN_COSTS;
+    return isFinite(costs[terrain]);
+  }
+
+  /** 2D grid for infantry pathfinding: 0 = walkable, 1 = blocked. */
+  getWalkableGrid(): number[][] {
+    const result: number[][] = [];
+    for (let y = 0; y < MAP_HEIGHT; y++) {
+      result[y] = [];
+      for (let x = 0; x < MAP_WIDTH; x++) {
+        result[y][x] = isFinite(TERRAIN_COSTS[this.grid[y][x]]) ? 0 : 1;
+      }
+    }
+    return result;
+  }
+
+  /** 2D grid for vehicle pathfinding: 0 = walkable, 1 = blocked. */
+  getVehicleGrid(): number[][] {
+    const result: number[][] = [];
+    for (let y = 0; y < MAP_HEIGHT; y++) {
+      result[y] = [];
+      for (let x = 0; x < MAP_WIDTH; x++) {
+        result[y][x] = isFinite(VEHICLE_TERRAIN_COSTS[this.grid[y][x]])
+          ? 0
+          : 1;
+      }
+    }
+    return result;
+  }
+
+  /** Place capturable buildings within neighborhoods. Returns placements. */
+  placeBuildings(): BuildingPlacement[] {
+    const placements: BuildingPlacement[] = [];
+
+    // Building pool per neighborhood (type + owner)
+    // Player start neighborhoods get a Compound; others get neutral buildings
+    const neutralPool: BuildingType[] = [
+      BuildingType.SPEAKEASY,
+      BuildingType.CORNER_STORE,
+      BuildingType.BACK_ALLEY_STILL,
+      BuildingType.BOOKIE_JOINT,
+      BuildingType.WAREHOUSE,
+      BuildingType.BOXING_GYM,
+      BuildingType.NIGHTCLUB,
+      BuildingType.DISTILLERY,
+      BuildingType.TRUCKING_DEPOT,
+      BuildingType.PAWN_SHOP,
+      BuildingType.CASINO,
+      BuildingType.NEWSPAPER_OFFICE,
+    ];
+
+    for (const hood of NEIGHBORHOODS) {
+      const owner = hood.name === 'P1 Start' ? 0 : hood.name === 'P2 Start' ? 1 : -1;
+
+      // Find road intersections inside this neighborhood
+      const intersections = this.findRoadIntersections(
+        hood.x,
+        hood.y,
+        hood.w,
+        hood.h,
+      );
+
+      // Shuffle and pick placement spots
+      this.rng.shuffle(intersections);
+
+      let placed = 0;
+      const maxBuildings = hood.name.startsWith('P') && owner >= 0 ? 4 : this.rng.int(3, 7);
+
+      // Player start gets a Compound first
+      if (owner >= 0) {
+        const compoundDef = BUILDING_DEFS[BuildingType.COMPOUND];
+        // Place compound near center of the start neighborhood
+        const cx = hood.x + Math.floor(hood.w / 2) - Math.floor(compoundDef.widthTiles / 2);
+        const cy = hood.y + Math.floor(hood.h / 2) - Math.floor(compoundDef.heightTiles / 2);
+        // Snap to nearest clear spot
+        const spot = this.findClearSpot(cx, cy, compoundDef.widthTiles, compoundDef.heightTiles, 6);
+        if (spot) {
+          placements.push({
+            type: BuildingType.COMPOUND,
+            tileX: spot.x,
+            tileY: spot.y,
+            owner,
+          });
+          this.stampBuildingFootprint(spot.x, spot.y, compoundDef.widthTiles, compoundDef.heightTiles);
+          placed++;
+        }
+      }
+
+      // Special: Waterfront gets import docks
+      if (hood.name === 'The Waterfront') {
+        const dockDef = BUILDING_DEFS[BuildingType.IMPORT_DOCK];
+        // Place 1-2 import docks near the water edge
+        for (let d = 0; d < 2 && intersections.length > 0; d++) {
+          const pt = intersections.pop()!;
+          const spot = this.findClearSpot(pt.x, pt.y, dockDef.widthTiles, dockDef.heightTiles, 4);
+          if (spot) {
+            placements.push({
+              type: BuildingType.IMPORT_DOCK,
+              tileX: spot.x,
+              tileY: spot.y,
+              owner: -1,
+            });
+            this.stampBuildingFootprint(spot.x, spot.y, dockDef.widthTiles, dockDef.heightTiles);
+            placed++;
+          }
+        }
+      }
+
+      // Downtown gets a City Hall Contact
+      if (hood.name === 'Downtown' && intersections.length > 0) {
+        const chDef = BUILDING_DEFS[BuildingType.CITY_HALL_CONTACT];
+        const pt = intersections.pop()!;
+        const spot = this.findClearSpot(pt.x, pt.y, chDef.widthTiles, chDef.heightTiles, 4);
+        if (spot) {
+          placements.push({
+            type: BuildingType.CITY_HALL_CONTACT,
+            tileX: spot.x,
+            tileY: spot.y,
+            owner: -1,
+          });
+          this.stampBuildingFootprint(spot.x, spot.y, chDef.widthTiles, chDef.heightTiles);
+          placed++;
+        }
+      }
+
+      // Fill remaining slots with random neutral buildings
+      const shuffledPool = [...neutralPool];
+      this.rng.shuffle(shuffledPool);
+      let poolIdx = 0;
+
+      while (placed < maxBuildings && intersections.length > 0 && poolIdx < shuffledPool.length) {
+        const bType = shuffledPool[poolIdx % shuffledPool.length];
+        poolIdx++;
+        const def = BUILDING_DEFS[bType];
+        const pt = intersections.pop()!;
+        const spot = this.findClearSpot(pt.x, pt.y, def.widthTiles, def.heightTiles, 4);
+        if (spot) {
+          placements.push({
+            type: bType,
+            tileX: spot.x,
+            tileY: spot.y,
+            owner: owner >= 0 ? owner : -1,
+          });
+          this.stampBuildingFootprint(spot.x, spot.y, def.widthTiles, def.heightTiles);
+          placed++;
+        }
+      }
+    }
+
+    return placements;
+  }
+
+  /**
+   * Place 3 StreetCorner markers per neighborhood at major intersections.
+   * Returns ~30 corner placements total.
+   */
+  placeStreetCorners(): StreetCornerPlacement[] {
+    const corners: StreetCornerPlacement[] = [];
+    let id = 0;
+
+    for (const hood of NEIGHBORHOODS) {
+      // Find major road intersections (where two 2-tile-wide roads cross)
+      const majors = this.findMajorIntersections(hood.x, hood.y, hood.w, hood.h);
+      this.rng.shuffle(majors);
+
+      const count = Math.min(3, majors.length);
+      for (let i = 0; i < count; i++) {
+        corners.push({
+          id: id++,
+          tileX: majors[i].x,
+          tileY: majors[i].y,
+          neighborhood: hood.name,
+        });
+      }
+    }
+
+    return corners;
+  }
+
+  /** Return the neighborhood name for a given tile position. */
+  getNeighborhoodAt(x: number, y: number): string {
+    // Check in definition order; first match wins (neighborhoods may overlap
+    // at edges, so order in the array determines priority).
+    for (const hood of NEIGHBORHOODS) {
+      if (
+        x >= hood.x &&
+        x < hood.x + hood.w &&
+        y >= hood.y &&
+        y < hood.y + hood.h
+      ) {
+        return hood.name;
+      }
+    }
+    return 'Unknown';
+  }
+
+  // ─── City Generation Internals ──────────────────────────────────────────
+
+  /**
+   * Lay down major and minor roads on a grid pattern.
+   * - Major roads every 16 tiles: 2-tile-wide road + 1 sidewalk each side
+   * - Minor roads every 8 tiles: 1-tile-wide road + sidewalk one side
+   */
+  private layRoadGrid(): void {
+    for (let y = 0; y < MAP_HEIGHT; y++) {
+      for (let x = 0; x < MAP_WIDTH; x++) {
+        const onMajorX = x % 16 === 0 || x % 16 === 1;
+        const onMajorY = y % 16 === 0 || y % 16 === 1;
+        const sidewalkMajorX = x % 16 === 15 || x % 16 === 2;
+        const sidewalkMajorY = y % 16 === 15 || y % 16 === 2;
+        const onMinorX = x % 8 === 0;
+        const onMinorY = y % 8 === 0;
+        const sidewalkMinorX = x % 8 === 1 || x % 8 === 7;
+        const sidewalkMinorY = y % 8 === 1 || y % 8 === 7;
+
+        if (onMajorX || onMajorY) {
+          this.grid[y][x] = TerrainType.ROAD;
+        } else if (sidewalkMajorX || sidewalkMajorY) {
+          this.grid[y][x] = TerrainType.SIDEWALK;
+        } else if (onMinorX || onMinorY) {
+          this.grid[y][x] = TerrainType.ROAD;
+        } else if (sidewalkMinorX || sidewalkMinorY) {
+          // Only place sidewalk next to a minor road if there IS a minor
+          // road adjacent (avoid sidewalk in the middle of a block)
+          if (
+            (sidewalkMinorX && (this.isRoadAt(x - 1, y) || this.isRoadAt(x + 1, y))) ||
+            (sidewalkMinorY && (this.isRoadAt(x, y - 1) || this.isRoadAt(x, y + 1)))
+          ) {
+            this.grid[y][x] = TerrainType.SIDEWALK;
+          }
+        }
+      }
+    }
+  }
+
+  /** Quick check for road placement (used during road-grid pass). */
+  private isRoadAt(x: number, y: number): boolean {
+    if (x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT) return false;
+    return this.grid[y][x] === TerrainType.ROAD;
+  }
+
+  /**
+   * Fill city blocks with WALL perimeter and BUILDING_FLOOR interior.
+   * A "block" is the interior area between roads/sidewalks.
+   */
+  private fillCityBlocks(): void {
+    // Identify rectangular interior regions by scanning between road lines.
+    // We walk through each major block (16x16 grid cells) and each sub-block
+    // (8x8 cells) and place walls along the inner perimeter.
+
+    for (let by = 0; by < MAP_HEIGHT; by += 8) {
+      for (let bx = 0; bx < MAP_WIDTH; bx += 8) {
+        // Find the interior rectangle of this sub-block
+        const interior = this.getBlockInterior(bx, by);
+        if (!interior) continue;
+
+        const { x0, y0, x1, y1 } = interior;
+        // Only stamp walls if the block is large enough (>= 3x3)
+        if (x1 - x0 < 3 || y1 - y0 < 3) continue;
+
+        for (let yy = y0; yy <= y1; yy++) {
+          for (let xx = x0; xx <= x1; xx++) {
+            // Skip if already road or sidewalk
+            if (
+              this.grid[yy][xx] === TerrainType.ROAD ||
+              this.grid[yy][xx] === TerrainType.SIDEWALK
+            ) {
+              continue;
+            }
+
+            const isPerimeter =
+              xx === x0 || xx === x1 || yy === y0 || yy === y1;
+            this.grid[yy][xx] = isPerimeter
+              ? TerrainType.WALL
+              : TerrainType.BUILDING_FLOOR;
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Returns the interior tile rect {x0,y0,x1,y1} for a sub-block starting
+   * at (bx, by), skipping road and sidewalk tiles.
+   */
+  private getBlockInterior(
+    bx: number,
+    by: number,
+  ): { x0: number; y0: number; x1: number; y1: number } | null {
+    // Scan inward from (bx, by) to find first non-road/sidewalk tile
+    let x0 = bx;
+    let y0 = by;
+    let x1 = Math.min(bx + 7, MAP_WIDTH - 1);
+    let y1 = Math.min(by + 7, MAP_HEIGHT - 1);
+
+    // Expand x0 past roads/sidewalks
+    while (x0 <= x1 && this.isTileRoadOrSidewalk(x0, by)) x0++;
+    while (x1 >= x0 && this.isTileRoadOrSidewalk(x1, by)) x1--;
+    while (y0 <= y1 && this.isTileRoadOrSidewalk(bx, y0)) y0++;
+    while (y1 >= y0 && this.isTileRoadOrSidewalk(bx, y1)) y1--;
+
+    if (x0 > x1 || y0 > y1) return null;
+    return { x0, y0, x1, y1 };
+  }
+
+  private isTileRoadOrSidewalk(x: number, y: number): boolean {
+    if (x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT) return true;
+    const t = this.grid[y][x];
+    return t === TerrainType.ROAD || t === TerrainType.SIDEWALK;
+  }
+
+  /**
+   * Cut alleys through some building blocks. An alley is a 1-tile-wide
+   * passable path that splits a block, allowing infantry shortcuts.
+   */
+  private addAlleys(): void {
+    // For roughly 25% of sub-blocks, cut a horizontal or vertical alley
+    for (let by = 0; by < MAP_HEIGHT; by += 8) {
+      for (let bx = 0; bx < MAP_WIDTH; bx += 8) {
+        if (this.rng.next() > 0.25) continue;
+
+        const interior = this.getBlockInterior(bx, by);
+        if (!interior) continue;
+        const { x0, y0, x1, y1 } = interior;
+        if (x1 - x0 < 4 || y1 - y0 < 4) continue;
+
+        const horizontal = this.rng.next() < 0.5;
+        if (horizontal) {
+          const ay = Math.floor((y0 + y1) / 2);
+          for (let xx = x0; xx <= x1; xx++) {
+            this.grid[ay][xx] = TerrainType.ALLEY;
+          }
+        } else {
+          const ax = Math.floor((x0 + x1) / 2);
+          for (let yy = y0; yy <= y1; yy++) {
+            this.grid[yy][ax] = TerrainType.ALLEY;
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Place 2-3 small parks (8x8 tiles each) at random spots.
+   * These overwrite whatever is there (floor, walls).
+   */
+  private addParks(): void {
+    const parkCount = this.rng.int(2, 4);
+    const placed: { x: number; y: number }[] = [];
+
+    let attempts = 0;
+    while (placed.length < parkCount && attempts < 50) {
+      attempts++;
+      // Pick a random block-aligned position away from map edges
+      const px = this.rng.int(2, (MAP_WIDTH / 8) - 2) * 8;
+      const py = this.rng.int(3, (MAP_HEIGHT / 8) - 2) * 8; // y>=3 to avoid water zone
+
+      // Don't overlap player starts
+      const inP1 = px < 40 && py >= 120;
+      const inP2 = px >= 120 && py < 40;
+      if (inP1 || inP2) continue;
+
+      // Don't overlap existing parks
+      const tooClose = placed.some(
+        (p) => Math.abs(p.x - px) < 16 && Math.abs(p.y - py) < 16,
+      );
+      if (tooClose) continue;
+
+      // Stamp the park
+      for (let yy = py; yy < py + 8 && yy < MAP_HEIGHT; yy++) {
+        for (let xx = px; xx < px + 8 && xx < MAP_WIDTH; xx++) {
+          this.grid[yy][xx] = TerrainType.PARK;
+        }
+      }
+      placed.push({ x: px, y: py });
+    }
+  }
+
+  /**
+   * Fill top 8 rows with water, then punch 3 bridge crossings through.
+   */
+  private addWaterAndBridges(): void {
+    const waterDepth = 8;
+
+    // Fill water
+    for (let y = 0; y < waterDepth; y++) {
+      for (let x = 0; x < MAP_WIDTH; x++) {
+        this.grid[y][x] = TerrainType.WATER;
+      }
+    }
+
+    // Place 3 bridges at major north-south roads
+    // Major roads are at x positions: 0,1, 16,17, 32,33, 48,49, ...
+    const bridgeXPositions: number[] = [];
+    for (let rx = 0; rx < MAP_WIDTH; rx += 16) {
+      bridgeXPositions.push(rx);
+    }
+    this.rng.shuffle(bridgeXPositions);
+
+    const bridgeCount = 3;
+    for (let i = 0; i < bridgeCount && i < bridgeXPositions.length; i++) {
+      const bx = bridgeXPositions[i];
+      // Bridge is 4 tiles wide (road + sidewalks)
+      for (let y = 0; y < waterDepth; y++) {
+        for (let dx = -1; dx <= 2; dx++) {
+          const xx = bx + dx;
+          if (xx >= 0 && xx < MAP_WIDTH) {
+            this.grid[y][xx] = TerrainType.BRIDGE;
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Scatter COVER_OBJECT tiles along sidewalks and at intersections
+   * to represent parked cars, crates, sandbags, etc.
+   */
+  private addCoverObjects(): void {
+    for (let y = 0; y < MAP_HEIGHT; y++) {
+      for (let x = 0; x < MAP_WIDTH; x++) {
+        if (this.grid[y][x] !== TerrainType.SIDEWALK) continue;
+        // Only place cover on ~4% of sidewalk tiles
+        if (this.rng.next() > 0.04) continue;
+        // Must be adjacent to a road
+        const adjRoad =
+          this.getTerrain(x - 1, y) === TerrainType.ROAD ||
+          this.getTerrain(x + 1, y) === TerrainType.ROAD ||
+          this.getTerrain(x, y - 1) === TerrainType.ROAD ||
+          this.getTerrain(x, y + 1) === TerrainType.ROAD;
+        if (adjRoad) {
+          this.grid[y][x] = TerrainType.COVER_OBJECT;
+        }
+      }
+    }
+  }
+
+  // ─── Neighborhood tint helpers ──────────────────────────────────────────
+
+  /**
+   * Apply a subtle colour tint to road and sidewalk tiles so each
+   * neighborhood is visually distinct. Phaser tilemap tiles support
+   * per-tile tint via the `tint` property.
+   */
+  private applyNeighborhoodTints(
+    layer: Phaser.Tilemaps.TilemapLayer,
+  ): void {
+    for (const hood of NEIGHBORHOODS) {
+      for (let y = hood.y; y < hood.y + hood.h && y < MAP_HEIGHT; y++) {
+        for (let x = hood.x; x < hood.x + hood.w && x < MAP_WIDTH; x++) {
+          const terrain = this.grid[y][x];
+          if (
+            terrain === TerrainType.ROAD ||
+            terrain === TerrainType.SIDEWALK
+          ) {
+            const tile = layer.getTileAt(x, y);
+            if (tile) {
+              tile.tint = hood.color;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // ─── Intersection / placement helpers ───────────────────────────────────
+
+  /**
+   * Find tiles inside a rectangle that sit at road intersections (where
+   * both the x and y position lie on road grid lines).
+   */
+  private findRoadIntersections(
+    rx: number,
+    ry: number,
+    rw: number,
+    rh: number,
+  ): { x: number; y: number }[] {
+    const results: { x: number; y: number }[] = [];
+    for (let y = ry + 2; y < ry + rh - 2; y++) {
+      for (let x = rx + 2; x < rx + rw - 2; x++) {
+        if (x >= MAP_WIDTH || y >= MAP_HEIGHT) continue;
+        if (this.grid[y][x] !== TerrainType.ROAD) continue;
+        // Check that there is road in both horizontal and vertical directions
+        const hRoad =
+          this.getTerrain(x - 1, y) === TerrainType.ROAD ||
+          this.getTerrain(x + 1, y) === TerrainType.ROAD;
+        const vRoad =
+          this.getTerrain(x, y - 1) === TerrainType.ROAD ||
+          this.getTerrain(x, y + 1) === TerrainType.ROAD;
+        if (hRoad && vRoad) {
+          results.push({ x, y });
+        }
+      }
+    }
+    // Thin out: keep at most one per 4x4 area to avoid clusters
+    return this.thinPoints(results, 4);
+  }
+
+  /**
+   * Find major intersections: where two 2-tile major roads cross.
+   * Major roads are at positions divisible by 16.
+   */
+  private findMajorIntersections(
+    rx: number,
+    ry: number,
+    rw: number,
+    rh: number,
+  ): { x: number; y: number }[] {
+    const results: { x: number; y: number }[] = [];
+    for (let my = ry; my < ry + rh; my += 16) {
+      for (let mx = rx; mx < rx + rw; mx += 16) {
+        if (mx < MAP_WIDTH && my < MAP_HEIGHT) {
+          results.push({ x: mx, y: my });
+        }
+      }
+    }
+    return results;
+  }
+
+  /**
+   * Remove points closer than `minDist` tiles to each other (greedy).
+   */
+  private thinPoints(
+    points: { x: number; y: number }[],
+    minDist: number,
+  ): { x: number; y: number }[] {
+    const kept: { x: number; y: number }[] = [];
+    for (const p of points) {
+      const tooClose = kept.some(
+        (k) =>
+          Math.abs(k.x - p.x) < minDist && Math.abs(k.y - p.y) < minDist,
+      );
+      if (!tooClose) kept.push(p);
+    }
+    return kept;
+  }
+
+  /**
+   * Starting from (cx, cy), search outward up to `radius` tiles for a clear
+   * rectangular area of size (w x h) that is entirely BUILDING_FLOOR or ROAD
+   * adjacent. Returns the top-left corner or null.
+   */
+  private findClearSpot(
+    cx: number,
+    cy: number,
+    w: number,
+    h: number,
+    radius: number,
+  ): { x: number; y: number } | null {
+    for (let r = 0; r <= radius; r++) {
+      for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          const tx = cx + dx;
+          const ty = cy + dy;
+          if (this.canPlaceBuilding(tx, ty, w, h)) {
+            return { x: tx, y: ty };
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Check whether a building footprint can be placed at (tx, ty).
+   * All tiles in the footprint must be BUILDING_FLOOR (not road, wall, water).
+   */
+  private canPlaceBuilding(
+    tx: number,
+    ty: number,
+    w: number,
+    h: number,
+  ): boolean {
+    if (tx < 0 || ty < 0 || tx + w > MAP_WIDTH || ty + h > MAP_HEIGHT) {
+      return false;
+    }
+    for (let yy = ty; yy < ty + h; yy++) {
+      for (let xx = tx; xx < tx + w; xx++) {
+        const t = this.grid[yy][xx];
+        if (t !== TerrainType.BUILDING_FLOOR) return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Mark a rectangular area as occupied by a building so future placements
+   * won't overlap. Sets perimeter to WALL and interior to BUILDING_FLOOR
+   * (matching the visual building block pattern).
+   */
+  private stampBuildingFootprint(
+    tx: number,
+    ty: number,
+    w: number,
+    h: number,
+  ): void {
+    for (let yy = ty; yy < ty + h; yy++) {
+      for (let xx = tx; xx < tx + w; xx++) {
+        const isEdge = xx === tx || xx === tx + w - 1 || yy === ty || yy === ty + h - 1;
+        this.grid[yy][xx] = isEdge ? TerrainType.WALL : TerrainType.BUILDING_FLOOR;
+      }
+    }
+  }
+}
