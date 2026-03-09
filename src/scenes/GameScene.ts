@@ -34,6 +34,7 @@ import { pathfinding } from '../utils/Pathfinding';
 import { EventBus, GameEvents } from '../utils/EventBus';
 import { tileToWorld, worldToTile as isoWorldToTile, isoDepth } from '../utils/IsometricUtils';
 import { CityBlock } from '../systems/MapSystem';
+import { FAMILIES, FamilyModifiers, DEFAULT_MODIFIERS } from '../data/families';
 
 // ─── Keyboard key references ────────────────────────────────────────────────
 
@@ -56,9 +57,9 @@ export class GameScene extends Phaser.Scene {
   unitSystem!: UnitSystem;
   buildingSystem!: BuildingSystem;
   combatSystem!: CombatSystem;
-  economySystem: any = null;
-  logisticsSystem: any = null;
-  territorySystem: any = null;
+  economySystem: EconomySystem | null = null;
+  logisticsSystem: LogisticsSystem | null = null;
+  territorySystem: TerritorySystem | null = null;
   fogOfWarSystem: FogOfWarSystem | null = null;
 
   // ── Tilemap reference ─────────────────────────────────────────────────
@@ -99,6 +100,14 @@ export class GameScene extends Phaser.Scene {
   // ── Win condition guard ──────────────────────────────────────────
   private gameOver: boolean = false;
 
+  // ── Family modifiers (player 0's selected family bonuses) ────────
+  public familyModifiers: FamilyModifiers = DEFAULT_MODIFIERS;
+
+  // ── EventBus listener references (for cleanup on scene restart) ──
+  private _onUnitProduced: any = null;
+  private _onTransportGoods: any = null;
+  private _onSquadWipedLogistics: any = null;
+
   constructor() {
     super({ key: 'GameScene' });
   }
@@ -108,13 +117,17 @@ export class GameScene extends Phaser.Scene {
   // ═══════════════════════════════════════════════════════════════════════
 
   create(): void {
+    // ── 0. Read selected family from lobby ──────────────────────────────
+    const familyIndex = this.registry.get('selectedFamily') ?? 0;
+    const selectedFamily = FAMILIES[familyIndex] ?? FAMILIES[0];
+    this.familyModifiers = selectedFamily.modifiers;
+
     // ── 1. Initialize map ───────────────────────────────────────────────
     this.mapSystem = new MapSystem(this, 42);
     this.mapSystem.generateCity();
     this.tilemap = this.mapSystem.renderMap();
 
-    // Expose tilemap on the scene so CombatSystem can read terrain
-    (this as any).tilemap = this.tilemap;
+    // tilemap is exposed as `this.tilemap` for CombatSystem terrain reads
 
     // Set world bounds
     this.physics.world.setBounds(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
@@ -128,6 +141,17 @@ export class GameScene extends Phaser.Scene {
     this.buildingSystem = new BuildingSystem(this);
     const buildingPlacements = this.mapSystem.placeBuildings();
     this.buildingSystem.initializeFromPlacements(buildingPlacements);
+
+    // Apply family building HP bonus to player 0's buildings
+    if (this.familyModifiers.buildingHpMultiplier !== 1.0) {
+      for (const building of this.buildingSystem.buildings.values()) {
+        if (building.owner === 0) {
+          const multiplier = this.familyModifiers.buildingHpMultiplier;
+          building.maxHp = Math.floor(building.maxHp * multiplier);
+          building.hp = building.maxHp;
+        }
+      }
+    }
 
     // ── 3b. Create visual skyscraper sprites for city blocks ──────────
     this.createCityBlockVisuals();
@@ -143,9 +167,11 @@ export class GameScene extends Phaser.Scene {
     // ── 5. Initialize combat system ─────────────────────────────────────
     this.combatSystem = new CombatSystem(this);
     this.combatSystem.setSquadLookup(this.unitSystem.squads);
+    this.combatSystem.setPlayerModifiers(0, this.familyModifiers); // P0 = human
 
     // ── 6. Initialize economy system ────────────────────────────────────
     this.economySystem = new EconomySystem(this, 2);
+    this.economySystem.setPlayerModifiers(0, this.familyModifiers); // P0 family bonuses
 
     // ── 7. Initialize logistics system ──────────────────────────────────
     this.logisticsSystem = new LogisticsSystem(this);
@@ -195,21 +221,27 @@ export class GameScene extends Phaser.Scene {
     }
 
     // ── 10. Listen for unit production ──────────────────────────────────
-    EventBus.on(GameEvents.UNIT_PRODUCED, (data: {
+    this._onUnitProduced = (data: {
       buildingId: string;
       unitType: string;
       tileX: number;
       tileY: number;
       rallyPoint: { x: number; y: number } | null;
     }) => {
-      // Spawn the new squad at the building's position
+      // Determine owner from the building that produced the unit
+      const building = this.buildingSystem.buildings.get(data.buildingId);
+      const owner = building ? building.owner : 0;
+
+      // Spawn outside the building footprint
+      const offsetX = building ? building.stats.widthTiles + 1 : 2;
+      const offsetY = building ? building.stats.heightTiles : 2;
       const spawnPos = this.findNearbyWalkable(
-        data.tileX + 2, // offset to spawn outside the building
-        data.tileY + 2,
+        data.tileX + offsetX,
+        data.tileY + offsetY,
       );
       const newSquad = this.unitSystem.spawnSquad(
         data.unitType as UnitType,
-        0, // player 0 -- only player buildings produce
+        owner,
         spawnPos.x,
         spawnPos.y,
       );
@@ -218,20 +250,25 @@ export class GameScene extends Phaser.Scene {
       if (data.rallyPoint) {
         newSquad.moveTo(data.rallyPoint.x, data.rallyPoint.y);
       }
-    });
+    };
+    EventBus.on(GameEvents.UNIT_PRODUCED, this._onUnitProduced);
 
     // ── 10b. Listen for transport goods commands ───────────────────────
-    EventBus.on(
-      GameEvents.TRANSPORT_GOODS,
-      (data: { buildingId: string; squads: string[] }) =>
-        this.handleTransportGoods(data),
-    );
+    this._onTransportGoods = (data: { buildingId: string; squads: string[] }) =>
+      this.handleTransportGoods(data);
+    EventBus.on(GameEvents.TRANSPORT_GOODS, this._onTransportGoods);
 
-    // ── 10c. Listen for squad wipes to handle goods carrier destruction ──
-    EventBus.on(
-      GameEvents.SQUAD_WIPED,
-      (squad: any) => this.handleSquadWipedLogistics(squad),
-    );
+    // ── 10c. Listen for squad wipes: goods cleanup + garrison cleanup ──
+    this._onSquadWipedLogistics = (squad: any) => {
+      this.handleSquadWipedLogistics(squad);
+      // Remove dead squad from any building's garrison list
+      if (squad?.id) {
+        for (const building of this.buildingSystem.buildings.values()) {
+          building.ungarrison(squad.id);
+        }
+      }
+    };
+    EventBus.on(GameEvents.SQUAD_WIPED, this._onSquadWipedLogistics);
 
     // ── 11. Spawn starting units ────────────────────────────────────────
     this.spawnStartingUnits();
@@ -886,12 +923,12 @@ export class GameScene extends Phaser.Scene {
       }
 
       if (nearest) {
-        // Move toward the building; garrison state is set but the unit
-        // remains visible until it arrives. The update loop will hide
-        // it once it stops moving and is still in 'garrisoned' state.
+        // Move toward the building; we store the target building ID on
+        // the squad so we can garrison it once it arrives (update loop).
         squad.moveTo(nearest.tileX, nearest.tileY);
         squad.state = 'garrisoned';
-        nearest.garrison(squad.id);
+        (squad as any)._garrisonTarget = nearest.id;
+        // Don't call nearest.garrison() yet — wait until squad arrives
       }
     }
   }
@@ -1011,7 +1048,7 @@ export class GameScene extends Phaser.Scene {
     this.idleCycleIndex++;
   }
 
-  private handleProduceUnit(unitType: UnitType): void {
+  handleProduceUnit(unitType: UnitType): void {
     const compound = this.buildingSystem.getCompound(0);
     if (!compound) return;
 
@@ -1021,15 +1058,22 @@ export class GameScene extends Phaser.Scene {
     const currentTier = this.economySystem ? this.economySystem.getTier(0) : 1;
     if (unitDef.tier > currentTier) return;
 
-    // Check if player can afford
+    // Apply family cost modifier
+    const costMultiplier = this.familyModifiers.unitCostMultiplier;
+    const adjustedCost = Math.ceil(unitDef.cost * costMultiplier);
+    const adjustedGoodsCost = Math.ceil(unitDef.goodsCost * costMultiplier);
+
+    // Check if player can afford (cash + goods)
     if (this.economySystem) {
-      const cash = this.economySystem.getCash(0);
-      if (cash < unitDef.cost) return;
-      this.economySystem.spendCash(0, unitDef.cost);
+      if (!this.economySystem.canAfford(0, adjustedCost, adjustedGoodsCost)) return;
+      this.economySystem.spendCash(0, adjustedCost);
+      if (adjustedGoodsCost > 0) {
+        this.economySystem.spendGoods(0, adjustedGoodsCost);
+      }
     }
 
-    // Queue the unit for production instead of instant spawn
-    compound.queueUnit(unitType);
+    // Queue the unit for production (train time modifier applied in Building.queueUnit)
+    compound.queueUnit(unitType, this.familyModifiers.trainTimeMultiplier);
 
     EventBus.emit(GameEvents.PRODUCE_UNIT, unitType, 0);
   }
@@ -1381,9 +1425,18 @@ export class GameScene extends Phaser.Scene {
       );
     }
 
-    // ── 6. Hide garrisoned units that have arrived ─────────────────────
+    // ── 6. Handle garrisoned units that have arrived ───────────────────
     for (const squad of this.unitSystem.squads.values()) {
       if (squad.state === 'garrisoned' && !squad.isMoving) {
+        // Actually register with the building once the squad arrives
+        const garrisonTargetId = (squad as any)._garrisonTarget;
+        if (garrisonTargetId) {
+          const building = this.buildingSystem.buildings.get(garrisonTargetId);
+          if (building && !building.garrisonedSquads.includes(squad.id)) {
+            building.garrison(squad.id);
+          }
+          (squad as any)._garrisonTarget = null;
+        }
         squad.sprite.setVisible(false);
         squad.healthBar.setVisible(false);
         squad.selectionCircle.setVisible(false);
@@ -1445,7 +1498,7 @@ export class GameScene extends Phaser.Scene {
       if (px > viewW - CAMERA_EDGE_ZONE) scrollX += CAMERA_SCROLL_SPEED;
       if (py < CAMERA_EDGE_ZONE) scrollY -= CAMERA_SCROLL_SPEED;
       // Only scroll down at bottom edge if mouse is ABOVE the bottom bar
-      if (py > viewH - CAMERA_EDGE_ZONE && py < bottomBarY) scrollY += CAMERA_SCROLL_SPEED;
+      if (py > bottomBarY - CAMERA_EDGE_ZONE && py < bottomBarY) scrollY += CAMERA_SCROLL_SPEED;
     }
 
     // Apply scroll (scaled by zoom and delta so speed feels consistent)
@@ -1498,5 +1551,24 @@ export class GameScene extends Phaser.Scene {
     const cam = this.cameras.main;
     const worldPoint = cam.getWorldPoint(pointer.x, pointer.y);
     return { x: worldPoint.x, y: worldPoint.y };
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // CLEANUP (called automatically by Phaser when scene shuts down/restarts)
+  // ═══════════════════════════════════════════════════════════════════════
+
+  shutdown(): void {
+    // Remove EventBus listeners to prevent duplicates on scene restart
+    if (this._onUnitProduced) EventBus.off(GameEvents.UNIT_PRODUCED, this._onUnitProduced);
+    if (this._onTransportGoods) EventBus.off(GameEvents.TRANSPORT_GOODS, this._onTransportGoods);
+    if (this._onSquadWipedLogistics) EventBus.off(GameEvents.SQUAD_WIPED, this._onSquadWipedLogistics);
+
+    // Tear down systems
+    this.unitSystem?.destroy();
+    this.buildingSystem?.destroy();
+    this.combatSystem?.destroy();
+    this.fogOfWarSystem?.destroy();
+    this.logisticsSystem?.destroy();
+    this.territorySystem?.destroy();
   }
 }

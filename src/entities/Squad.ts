@@ -3,11 +3,11 @@
 // Each squad has a sprite, health bar, selection circle, and pathfinding logic.
 
 import Phaser from 'phaser';
-import { TILE_SIZE, TILE_WIDTH, TILE_HEIGHT, PLAYER_COLORS } from '../data/config';
+import { TILE_WIDTH, TILE_HEIGHT, PLAYER_COLORS } from '../data/config';
 import { UnitType, UnitStats, UNIT_DEFS } from '../data/units';
 import { pathfinding } from '../utils/Pathfinding';
 import { EventBus, GameEvents } from '../utils/EventBus';
-import { tileToWorld, isoDepth } from '../utils/IsometricUtils';
+import { tileToWorld, isoDepth, worldToTileFloat } from '../utils/IsometricUtils';
 
 let squadCounter = 0;
 
@@ -40,6 +40,10 @@ export class Squad {
   public carryingGoods: number;
   public commandQueue: { type: 'move' | 'attack' | 'attackMove'; target: { x: number; y: number }; attackTarget?: Squad | null }[] = [];
   public isAttackMoving: boolean = false;
+  /** Saved destination for attack-move resume after killing a target */
+  private attackMoveDestination: { x: number; y: number } | null = null;
+  /** Guard to prevent flooding pathfinder with duplicate requests */
+  public pendingPathRequest: boolean = false;
   private isDestroyed: boolean = false;
   public sprite: Phaser.GameObjects.Sprite;
   public healthBar: Phaser.GameObjects.Graphics;
@@ -155,17 +159,20 @@ export class Squad {
   moveTo(tileX: number, tileY: number): void {
     this.targetTileX = tileX;
     this.targetTileY = tileY;
+    this.pendingPathRequest = true;
 
     pathfinding
       .findPath(this.tileX, this.tileY, tileX, tileY, this.stats.isVehicle)
       .then((foundPath) => {
+        this.pendingPathRequest = false;
+        if (this.isDestroyed) return;
         if (foundPath.length > 0) {
-          // Skip the first node (current position)
           this.path = foundPath;
           this.pathIndex = 1;
           this.isMoving = true;
-          this.state = 'moving';
-          this.attackTarget = null;
+          if (this.state !== 'attacking' && this.state !== 'capturing' && this.state !== 'garrisoned') {
+            this.state = 'moving';
+          }
         }
       });
   }
@@ -173,6 +180,7 @@ export class Squad {
   /** Move toward a destination, but engage any enemies encountered along the way. */
   attackMoveTo(tileX: number, tileY: number): void {
     this.isAttackMoving = true;
+    this.attackMoveDestination = { x: tileX, y: tileY };
     this.moveTo(tileX, tileY);
   }
 
@@ -235,7 +243,9 @@ export class Squad {
 
     // Sync visuals to current interpolated position
     this.sprite.setPosition(this.pixelPosX, this.pixelPosY);
-    this.sprite.setDepth(isoDepth(this.tileX, this.tileY, 1));
+    // Use interpolated pixel position for smooth depth sorting during movement
+    const floatTile = worldToTileFloat(this.pixelPosX, this.pixelPosY);
+    this.sprite.setDepth(isoDepth(floatTile.x, floatTile.y, 1));
     this.drawHealthBar();
     this.updateSelectionCirclePosition();
   }
@@ -289,21 +299,17 @@ export class Squad {
     if (!this.attackTarget || this.attackTarget.hp <= 0) {
       this.attackTarget = null;
 
-      // If attack-moving, resume movement toward the original destination
-      if (this.isAttackMoving) {
+      // If attack-moving, resume movement toward the saved destination
+      if (this.isAttackMoving && this.attackMoveDestination) {
         this.state = 'moving';
-        if (this.path.length > 0) {
-          this.isMoving = true;
-        } else {
-          // Original path was consumed or never set; re-path to the destination
-          this.isAttackMoving = false;
-          this.state = 'idle';
-          this.executeNextCommand();
-        }
+        this.attackMoveTo(this.attackMoveDestination.x, this.attackMoveDestination.y);
         return;
       }
 
+      this.isAttackMoving = false;
+      this.attackMoveDestination = null;
       this.state = 'idle';
+      this.executeNextCommand();
       return;
     }
 
@@ -321,8 +327,8 @@ export class Squad {
       } else {
         this.sprite.setFlipX(false);
       }
-    } else {
-      // Out of range: move toward the target
+    } else if (!this.isMoving && !this.pendingPathRequest) {
+      // Out of range and not already moving/pathing: move toward the target
       this.moveTo(this.attackTarget.tileX, this.attackTarget.tileY);
     }
   }
@@ -333,6 +339,8 @@ export class Squad {
   stop(): void {
     this.isMoving = false;
     this.isAttackMoving = false;
+    this.attackMoveDestination = null;
+    this.pendingPathRequest = false;
     this.path = [];
     this.pathIndex = 0;
     this.attackTarget = null;
@@ -349,7 +357,8 @@ export class Squad {
     const hpPerMember = this.stats.hpPerMember;
     this.members = Math.max(0, Math.ceil(this.hp / hpPerMember));
 
-    EventBus.emit(GameEvents.UNIT_DAMAGED, this, amount);
+    // Note: UNIT_DAMAGED event is emitted by CombatSystem with full context
+    // (target id, damage, attacker id) — not duplicated here.
 
     if (this.hp <= 0) {
       this.die();
@@ -393,14 +402,30 @@ export class Squad {
 
   // ─── Utility ────────────────────────────────────────────────────────────────
 
+  /** Cached tile-center position. Recomputed when tileX/tileY change. */
+  private _cachedTileX: number = -1;
+  private _cachedTileY: number = -1;
+  private _cachedPosX: number = 0;
+  private _cachedPosY: number = 0;
+
+  private ensureCachedPos(): void {
+    if (this._cachedTileX !== this.tileX || this._cachedTileY !== this.tileY) {
+      const pos = tileToWorld(this.tileX, this.tileY);
+      this._cachedPosX = pos.x;
+      this._cachedPosY = pos.y;
+      this._cachedTileX = this.tileX;
+      this._cachedTileY = this.tileY;
+    }
+  }
+
   getPixelX(): number {
-    const pos = tileToWorld(this.tileX, this.tileY);
-    return pos.x;
+    this.ensureCachedPos();
+    return this._cachedPosX;
   }
 
   getPixelY(): number {
-    const pos = tileToWorld(this.tileX, this.tileY);
-    return pos.y;
+    this.ensureCachedPos();
+    return this._cachedPosY;
   }
 
   distanceTo(other: Squad): number {

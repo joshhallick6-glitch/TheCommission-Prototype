@@ -11,7 +11,6 @@ import Phaser from 'phaser';
 import {
   MAP_WIDTH,
   MAP_HEIGHT,
-  TILE_SIZE,
   TILE_WIDTH,
   TILE_HEIGHT,
   WORLD_WIDTH,

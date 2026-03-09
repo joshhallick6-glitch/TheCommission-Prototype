@@ -1681,7 +1681,14 @@ export class UIScene extends Phaser.Scene {
       const p0 = data.players.find((p) => p.player === 0);
       if (p0) {
         this.incomeRate = p0.incomePerMin ?? 0;
-        // goodsRate and influenceRate are not in the tick payload; leave at 0
+      }
+      // Read goods/influence rates from EconomySystem
+      const gameScene = this.scene.get('GameScene') as any;
+      if (gameScene?.economySystem) {
+        const eco = gameScene.economySystem;
+        this.goodsRate = eco.getGoodsRate?.(0) ?? 0;
+        const econ = eco.getPlayerEconomy?.(0);
+        this.influenceRate = econ?.influencePerMin ?? 0;
       }
     });
 

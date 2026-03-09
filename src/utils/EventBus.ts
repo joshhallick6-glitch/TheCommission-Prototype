@@ -24,9 +24,18 @@ class EventBusClass {
   emit(event: string, ...args: any[]): void {
     const cbs = this.listeners.get(event);
     if (cbs) {
-      for (const cb of cbs) {
+      // Snapshot the array so off() during emit doesn't skip callbacks
+      const snapshot = cbs.slice();
+      for (const cb of snapshot) {
         cb(...args);
       }
+    }
+  }
+
+  /** Remove ALL listeners for a specific event registered by a given callback set. */
+  removeAll(pairs: [string, EventCallback][]): void {
+    for (const [event, callback] of pairs) {
+      this.off(event, callback);
     }
   }
 

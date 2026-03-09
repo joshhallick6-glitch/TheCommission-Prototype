@@ -3,7 +3,7 @@
 // Listens to EventBus for move/attack orders from the input layer.
 
 import Phaser from 'phaser';
-import { TILE_SIZE } from '../data/config';
+import { TILE_WIDTH, TILE_HEIGHT } from '../data/config';
 import { UnitType } from '../data/units';
 import { Squad, setEnemyScanCallback } from '../entities/Squad';
 import { pathfinding } from '../utils/Pathfinding';
@@ -102,15 +102,16 @@ export class UnitSystem {
    * Returns the first match or null.
    */
   getSquadAtPixel(x: number, y: number): Squad | null {
-    const halfTile = TILE_SIZE / 2;
+    const halfW = TILE_WIDTH / 2;  // 32px — matches isometric tile width
+    const halfH = TILE_HEIGHT / 2; // 16px — matches isometric tile height
     for (const squad of this.squads.values()) {
       const sx = squad.getPixelX();
       const sy = squad.getPixelY();
       if (
-        x >= sx - halfTile &&
-        x <= sx + halfTile &&
-        y >= sy - halfTile &&
-        y <= sy + halfTile
+        x >= sx - halfW &&
+        x <= sx + halfW &&
+        y >= sy - halfH &&
+        y <= sy + halfH
       ) {
         return squad;
       }

@@ -14,6 +14,7 @@ import {
   TIER_COSTS,
 } from '../data/config';
 import { EventBus, GameEvents } from '../utils/EventBus';
+import { FamilyModifiers, DEFAULT_MODIFIERS } from '../data/families';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -36,6 +37,8 @@ export class EconomySystem {
   public scene: Phaser.Scene;
   public players: PlayerEconomy[];
   public tickTimer: number;
+  /** Family modifiers per player index. */
+  private playerModifiers: Map<number, FamilyModifiers> = new Map();
 
   constructor(scene: Phaser.Scene, playerCount: number) {
     this.scene = scene;
@@ -59,6 +62,18 @@ export class EconomySystem {
     }
   }
 
+  /** Set family modifiers for a specific player. */
+  setPlayerModifiers(player: number, modifiers: FamilyModifiers): void {
+    this.playerModifiers.set(player, modifiers);
+  }
+
+  // ─── Lifecycle ───────────────────────────────────────────────────────────
+
+  /** Clean up on scene teardown. Called by GameScene.shutdown(). */
+  destroy(): void {
+    this.players = [];
+  }
+
   // ─── Main Update ──────────────────────────────────────────────────────────
 
   /**
@@ -78,99 +93,109 @@ export class EconomySystem {
   ): void {
     this.tickTimer += delta;
 
-    if (this.tickTimer < TICK_RATE) return;
+    // Process ALL accumulated ticks (handles lag spikes correctly)
+    while (this.tickTimer >= TICK_RATE) {
+      this.tickTimer -= TICK_RATE;
 
-    // Process one tick (drain the accumulated time)
-    this.tickTimer -= TICK_RATE;
+      for (let playerIdx = 0; playerIdx < this.players.length; playerIdx++) {
+        const economy = this.players[playerIdx];
+        const buildings = getBuildingsByOwner(playerIdx);
 
-    for (let playerIdx = 0; playerIdx < this.players.length; playerIdx++) {
-      const economy = this.players[playerIdx];
-      const buildings = getBuildingsByOwner(playerIdx);
+        // ── Calculate raw income totals for this tick ──────────────────────
+        let totalCashPerMin = 0;
+        let totalGoodsPerMin = 0;
+        let totalInfluencePerMin = 0;
 
-      // ── Calculate raw income totals for this tick ────────────────────────
-      let totalCashPerMin = 0;
-      let totalGoodsPerMin = 0;
-      let totalInfluencePerMin = 0;
+        for (const building of buildings) {
+          const stats = building.stats;
+          const neighborhood = getNeighborhoodAt(
+            building.tileX,
+            building.tileY,
+          );
+          const influenceMultiplier = getInfluenceMultiplier(
+            neighborhood,
+            playerIdx,
+          );
 
-      for (const building of buildings) {
-        const stats = building.stats;
-        const neighborhood = getNeighborhoodAt(building.tileX, building.tileY);
-        const influenceMultiplier = getInfluenceMultiplier(
-          neighborhood,
-          playerIdx,
-        );
+          // Cash income is base rate * influence multiplier for that neighborhood
+          totalCashPerMin += stats.cashPerMin * influenceMultiplier;
 
-        // Cash income is base rate * influence multiplier for that neighborhood
-        totalCashPerMin += stats.cashPerMin * influenceMultiplier;
+          // Goods production rate (tracked for UI display, but NOT added here —
+          // goods must be physically transported by trucks)
+          totalGoodsPerMin += stats.goodsPerMin;
 
-        // Goods production rate (tracked for UI display, but NOT added here —
-        // goods must be physically transported by trucks)
-        totalGoodsPerMin += stats.goodsPerMin;
+          // Influence income
+          totalInfluencePerMin += stats.influencePerMin * influenceMultiplier;
+        }
 
-        // Influence income
-        totalInfluencePerMin += stats.influencePerMin * influenceMultiplier;
+        // ── Apply family income/influence multipliers ──────────────────────
+        const mods = this.playerModifiers.get(playerIdx) ?? DEFAULT_MODIFIERS;
+        totalCashPerMin *= mods.cashIncomeMultiplier;
+        totalInfluencePerMin *= mods.influenceGainMultiplier;
+
+        // ── Subtract building maintenance ─────────────────────────────────
+        // BUILDING_MAINTENANCE is $/min per building, convert to per-tick amount
+        // TICK_RATE is in ms, so per-tick = (rate / 60) * (TICK_RATE / 1000)
+        const maintenanceCostPerTick =
+          buildings.length * (BUILDING_MAINTENANCE / 60) * (TICK_RATE / 1000);
+
+        // ── Convert per-minute rates to per-tick amounts ──────────────────
+        const tickFraction = TICK_RATE / 1000 / 60; // fraction of a minute per tick
+        const cashThisTick =
+          totalCashPerMin * tickFraction - maintenanceCostPerTick;
+        const influenceThisTick = totalInfluencePerMin * tickFraction;
+
+        // ── Apply resource changes ────────────────────────────────────────
+        const prevCash = economy.cash;
+        const prevInfluence = economy.influence;
+
+        economy.cash += cashThisTick;
+        // Cash can go negative (player is bleeding money from maintenance)
+        // but we floor at 0 to avoid confusion — buildings don't auto-abandon
+        economy.cash = Math.max(0, economy.cash);
+
+        economy.influence += influenceThisTick;
+
+        // ── Store display rates ───────────────────────────────────────────
+        economy.incomePerMin =
+          totalCashPerMin - buildings.length * BUILDING_MAINTENANCE;
+        economy.goodsPerMin = totalGoodsPerMin;
+        economy.influencePerMin = totalInfluencePerMin;
+
+        // ── Emit change events ────────────────────────────────────────────
+        if (economy.cash !== prevCash) {
+          EventBus.emit(GameEvents.CASH_CHANGED, {
+            player: playerIdx,
+            cash: economy.cash,
+            delta: economy.cash - prevCash,
+          });
+        }
+
+        if (economy.influence !== prevInfluence) {
+          EventBus.emit(GameEvents.INFLUENCE_CHANGED, {
+            player: playerIdx,
+            influence: economy.influence,
+            delta: economy.influence - prevInfluence,
+          });
+        }
+
+        // ── Advance tier research if active ───────────────────────────────
+        if (economy.tierResearchActive) {
+          this.advanceTierResearch(playerIdx, TICK_RATE);
+        }
       }
 
-      // ── Subtract building maintenance ───────────────────────────────────
-      // BUILDING_MAINTENANCE is $/min per building, convert to per-tick amount
-      // TICK_RATE is in ms, so per-tick = (rate / 60) * (TICK_RATE / 1000)
-      const maintenanceCostPerTick =
-        buildings.length * (BUILDING_MAINTENANCE / 60) * (TICK_RATE / 1000);
-
-      // ── Convert per-minute rates to per-tick amounts ────────────────────
-      const tickFraction = TICK_RATE / 1000 / 60; // fraction of a minute per tick
-      const cashThisTick = totalCashPerMin * tickFraction - maintenanceCostPerTick;
-      const influenceThisTick = totalInfluencePerMin * tickFraction;
-
-      // ── Apply resource changes ──────────────────────────────────────────
-      const prevCash = economy.cash;
-      const prevInfluence = economy.influence;
-
-      economy.cash += cashThisTick;
-      // Cash can go negative (player is bleeding money from maintenance)
-      // but we floor at 0 to avoid confusion — buildings don't auto-abandon
-      economy.cash = Math.max(0, economy.cash);
-
-      economy.influence += influenceThisTick;
-
-      // ── Store display rates ─────────────────────────────────────────────
-      economy.incomePerMin = totalCashPerMin - buildings.length * BUILDING_MAINTENANCE;
-      economy.goodsPerMin = totalGoodsPerMin;
-      economy.influencePerMin = totalInfluencePerMin;
-
-      // ── Emit change events ──────────────────────────────────────────────
-      if (economy.cash !== prevCash) {
-        EventBus.emit(GameEvents.CASH_CHANGED, {
-          player: playerIdx,
-          cash: economy.cash,
-          delta: economy.cash - prevCash,
-        });
-      }
-
-      if (economy.influence !== prevInfluence) {
-        EventBus.emit(GameEvents.INFLUENCE_CHANGED, {
-          player: playerIdx,
-          influence: economy.influence,
-          delta: economy.influence - prevInfluence,
-        });
-      }
-
-      // ── Advance tier research if active ─────────────────────────────────
-      if (economy.tierResearchActive) {
-        this.advanceTierResearch(playerIdx, TICK_RATE);
-      }
+      // ── Global tick event ─────────────────────────────────────────────────
+      EventBus.emit(GameEvents.INCOME_TICK, {
+        players: this.players.map((p, i) => ({
+          player: i,
+          cash: p.cash,
+          goods: p.goods,
+          influence: p.influence,
+          incomePerMin: p.incomePerMin,
+        })),
+      });
     }
-
-    // ── Global tick event ───────────────────────────────────────────────────
-    EventBus.emit(GameEvents.INCOME_TICK, {
-      players: this.players.map((p, i) => ({
-        player: i,
-        cash: p.cash,
-        goods: p.goods,
-        influence: p.influence,
-        incomePerMin: p.incomePerMin,
-      })),
-    });
   }
 
   // ─── Resource Getters ─────────────────────────────────────────────────────

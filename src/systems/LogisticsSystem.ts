@@ -213,8 +213,10 @@ export class LogisticsSystem {
   ): void {
     // Check the truck is actually near the source building
     if (!this.isSquadAtBuilding(squad, sourceBuilding)) {
-      // Move toward the source building if not there yet
-      squad.moveTo(sourceBuilding.tileX, sourceBuilding.tileY);
+      // Move toward the source building if not already moving/pathing
+      if (!squad.isMoving && !squad.pendingPathRequest) {
+        squad.moveTo(sourceBuilding.tileX, sourceBuilding.tileY);
+      }
       return;
     }
 

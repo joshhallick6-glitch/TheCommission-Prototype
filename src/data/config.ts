@@ -92,7 +92,7 @@ export const TERRAIN_COSTS: Record<TerrainType, number> = {
   [TerrainType.PARK]: 1.4,
   [TerrainType.WATER]: Infinity,
   [TerrainType.BRIDGE]: 1,
-  [TerrainType.COVER_OBJECT]: Infinity,
+  [TerrainType.COVER_OBJECT]: 1.5,
 };
 
 // passability for vehicles (can't use alleys or building interiors)

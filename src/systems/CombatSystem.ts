@@ -6,7 +6,6 @@
 
 import Phaser from 'phaser';
 import {
-  TILE_SIZE,
   TerrainType,
   COVER_DAMAGE_REDUCTION,
   GARRISON_DAMAGE_REDUCTION,
@@ -14,8 +13,10 @@ import {
   RETREAT_DPS_MULTIPLIER,
   VETERANCY_BONUS,
 } from '../data/config';
+import { PLAYER_COLORS } from '../data/config';
 import { EventBus, GameEvents } from '../utils/EventBus';
 import { tileToWorld } from '../utils/IsometricUtils';
+import { FamilyModifiers, DEFAULT_MODIFIERS } from '../data/families';
 
 export class CombatSystem {
   scene: Phaser.Scene;
@@ -25,6 +26,8 @@ export class CombatSystem {
 
   /** Live squad references, keyed by squad id. Set externally by the game scene. */
   private squadLookup: Map<string, any> = new Map();
+  /** Family modifiers per player index. */
+  private playerModifiers: Map<number, FamilyModifiers> = new Map();
 
   constructor(scene: Phaser.Scene) {
     this.scene = scene;
@@ -39,6 +42,11 @@ export class CombatSystem {
    */
   setSquadLookup(lookup: Map<string, any>): void {
     this.squadLookup = lookup;
+  }
+
+  /** Set family modifiers for a specific player. */
+  setPlayerModifiers(player: number, modifiers: FamilyModifiers): void {
+    this.playerModifiers.set(player, modifiers);
   }
 
   /** Main update -- accumulate delta and resolve ticks. */
@@ -192,6 +200,10 @@ export class CombatSystem {
       damage *= 1 + VETERANCY_BONUS * vetLevel;
     }
 
+    // Family DPS modifier (attacker)
+    const attackerMods = this.playerModifiers.get(attacker.owner) ?? DEFAULT_MODIFIERS;
+    damage *= attackerMods.unitDpsMultiplier;
+
     // Retreating penalty (attacker)
     if (attacker.state === 'retreating') {
       damage *= RETREAT_DPS_MULTIPLIER;
@@ -204,14 +216,20 @@ export class CombatSystem {
 
     // ── Target modifiers (damage reduction) ────────────────────────────
 
-    // Garrison
+    // Garrison (with family bonus)
+    const targetMods = this.playerModifiers.get(target.owner) ?? DEFAULT_MODIFIERS;
     if (target.state === 'garrisoned') {
-      damage *= 1 - GARRISON_DAMAGE_REDUCTION;
+      damage *= 1 - (GARRISON_DAMAGE_REDUCTION + targetMods.garrisonReductionBonus);
     }
 
     // Cover: target on a COVER_OBJECT tile, or on a SIDEWALK adjacent to a WALL
-    if (this.hasCover(terrainAtTarget, target.tileX, target.tileY)) {
+    const inCover = this.hasCover(terrainAtTarget, target.tileX, target.tileY);
+    if (inCover) {
       damage *= 1 - COVER_DAMAGE_REDUCTION;
+      // Family cover DPS bonus for attacker (Ashfords get +5% DPS when in cover)
+      if (this.hasCover(this.getTerrainAt(attacker.tileX, attacker.tileY), attacker.tileX, attacker.tileY)) {
+        damage *= 1 + attackerMods.coverDpsBonus;
+      }
     }
 
     return Math.max(0, damage);
@@ -415,9 +433,23 @@ export class CombatSystem {
 
     sprite.setTint(0xff0000);
     this.scene.time.delayedCall(80, () => {
-      if (sprite && !sprite.scene) return; // destroyed check
-      sprite.clearTint();
+      if (!sprite || !sprite.scene) return; // destroyed check
+      // Restore owner tint instead of clearing (fixes units losing player color)
+      const ownerColor = (target.owner !== undefined)
+        ? PLAYER_COLORS[target.owner as keyof typeof PLAYER_COLORS]
+        : undefined;
+      if (ownerColor !== undefined) {
+        sprite.setTint(ownerColor);
+      } else {
+        sprite.clearTint();
+      }
     });
+  }
+
+  /** Clean up combat system state on scene teardown. */
+  destroy(): void {
+    this.combatPairs.clear();
+    this.squadLookup = new Map();
   }
 
   /** Apply a small camera shake if the world position is near the viewport. */

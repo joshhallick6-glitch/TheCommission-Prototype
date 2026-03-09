@@ -637,10 +637,12 @@ export class MapSystem {
       );
       if (tooClose) continue;
 
-      // Stamp the park
+      // Stamp the park — only overwrite WALL tiles to preserve the road/sidewalk grid
       for (let yy = py; yy < py + 8 && yy < MAP_HEIGHT; yy++) {
         for (let xx = px; xx < px + 8 && xx < MAP_WIDTH; xx++) {
-          this.grid[yy][xx] = TerrainType.PARK;
+          if (this.grid[yy][xx] === TerrainType.WALL) {
+            this.grid[yy][xx] = TerrainType.PARK;
+          }
         }
       }
       placed.push({ x: px, y: py });

@@ -50,7 +50,8 @@ export class MenuScene extends Phaser.Scene {
         color: '#DAA520',
         align: 'center',
       })
-      .setOrigin(0.5);
+      .setOrigin(0.5)
+      .setDepth(2);
 
     // ── Subtitle ──────────────────────────────────────────────────────────
     this.add
@@ -65,7 +66,8 @@ export class MenuScene extends Phaser.Scene {
           align: 'center',
         },
       )
-      .setOrigin(0.5);
+      .setOrigin(0.5)
+      .setDepth(2);
 
     // ── START GAME button ─────────────────────────────────────────────────
     this.createStartButton();
@@ -109,8 +111,8 @@ export class MenuScene extends Phaser.Scene {
     });
   }
 
-  update(): void {
-    this.drawRain();
+  update(_time: number, delta: number): void {
+    this.drawRain(delta);
   }
 
   // ── Rain helpers ──────────────────────────────────────────────────────────
@@ -127,16 +129,17 @@ export class MenuScene extends Phaser.Scene {
     };
   }
 
-  /** Advance and redraw all rain lines each frame. */
-  private drawRain(): void {
+  /** Advance and redraw all rain lines each frame (delta-normalized to 60fps). */
+  private drawRain(delta: number): void {
     this.rainGfx.clear();
     this.rainGfx.lineStyle(1, 0x444444, 0.3);
 
     const w = this.viewW;
     const h = this.viewH;
+    const dtFactor = delta / 16.67; // normalize to 60fps
 
     for (const line of this.rainLines) {
-      line.y += line.speed;
+      line.y += line.speed * dtFactor;
 
       // Reset when off-screen
       if (line.y > h + line.length) {

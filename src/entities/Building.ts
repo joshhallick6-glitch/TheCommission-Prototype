@@ -50,6 +50,7 @@ export class Building {
   healthBar: Phaser.GameObjects.Graphics;
   label: Phaser.GameObjects.Text;
   selected: boolean = false;
+  private isDestroyed: boolean = false;
 
   private scene: Phaser.Scene;
   private pixelX: number;
@@ -102,7 +103,8 @@ export class Building {
         this.stats.color, 0.8,
       );
     }
-    this.sprite.setDepth(isoDepth(tileX + this.stats.heightTiles, tileY + this.stats.heightTiles, 0));
+    // Depth based on bottom-right corner of the footprint for correct iso sorting
+    this.sprite.setDepth(isoDepth(tileX + this.stats.widthTiles - 1, tileY + this.stats.heightTiles - 1, 0));
 
     // ── Owner border ───────────────────────────────────────────────────────────
     this.borderGraphics = scene.add.graphics();
@@ -201,6 +203,12 @@ export class Building {
     this.capturingPlayer = -1;
     this.captureBar.setVisible(false);
 
+    // Clear production queue (don't finish old owner's units)
+    this.productionQueue = [];
+
+    // Clear garrison (garrisoned squads are ejected on capture)
+    this.garrisonedSquads = [];
+
     // Update visuals
     this.updateBorder();
 
@@ -268,17 +276,20 @@ export class Building {
   // ─── Production Queue ──────────────────────────────────────────────────────
 
   /** Queue a unit for production. Max queue size = 5. Only for buildings with canProduceUnits. */
-  queueUnit(unitType: string): boolean {
+  queueUnit(unitType: string, trainTimeMultiplier: number = 1.0): boolean {
     if (!this.stats.canProduceUnits) return false;
     if (this.productionQueue.length >= 5) return false;
 
     const unitDef = UNIT_DEFS[unitType as keyof typeof UNIT_DEFS];
     if (!unitDef) return false;
 
+    // Apply family train time modifier (e.g., Korvaks get -12% for T2+)
+    const effectiveMultiplier = unitDef.tier >= 2 ? trainTimeMultiplier : 1.0;
+
     this.productionQueue.push({
       unitType,
       progress: 0,
-      totalTime: unitDef.trainTime * 1000, // convert seconds to ms
+      totalTime: unitDef.trainTime * 1000 * effectiveMultiplier,
     });
     return true;
   }
@@ -498,6 +509,9 @@ export class Building {
 
   /** Remove all Phaser objects and emit BUILDING_DESTROYED. */
   destroy(): void {
+    if (this.isDestroyed) return;
+    this.isDestroyed = true;
+
     EventBus.emit(GameEvents.BUILDING_DESTROYED, {
       buildingId: this.id,
       type: this.type,

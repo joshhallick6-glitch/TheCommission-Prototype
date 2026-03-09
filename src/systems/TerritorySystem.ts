@@ -6,7 +6,6 @@
 
 import Phaser from 'phaser';
 import {
-  TILE_SIZE,
   TILE_WIDTH,
   TILE_HEIGHT,
   STREET_CORNER_RADIUS,
@@ -378,5 +377,22 @@ export class TerritorySystem {
 
     // Edge case: exactly at the last breakpoint
     return INFLUENCE_BREAKPOINTS[INFLUENCE_BREAKPOINTS.length - 1].multiplier;
+  }
+
+  /** Clean up graphics, tweens, and state on scene teardown. */
+  destroy(): void {
+    // Kill all contested pulse tweens
+    for (const tween of this.contestedTimers.values()) {
+      tween.destroy();
+    }
+    this.contestedTimers.clear();
+
+    // Destroy corner marker graphics
+    for (const corner of this.streetCorners) {
+      if (corner.marker) {
+        corner.marker.destroy();
+      }
+    }
+    this.streetCorners = [];
   }
 }

@@ -9,7 +9,34 @@ export interface FamilyData {
   bonuses: string[]; // list of faction bonuses
   color: number; // hex color
   accentColor: number; // lighter accent
+  /** Numeric gameplay modifiers (1.0 = no change, 1.15 = +15%, etc.) */
+  modifiers: FamilyModifiers;
 }
+
+export interface FamilyModifiers {
+  buildingHpMultiplier: number;       // Morellis: 1.15
+  garrisonReductionBonus: number;     // Morellis: 0.10 (added to base)
+  influenceGainMultiplier: number;    // Ashfords: 1.20
+  unitDpsMultiplier: number;          // Ashfords: 0.90, Korvaks: 1.10
+  coverDpsBonus: number;              // Ashfords: 0.05 (extra DPS when in cover)
+  trainTimeMultiplier: number;        // Korvaks: 0.88 for T2+
+  unitCostMultiplier: number;         // Korvaks: 1.05
+  cashIncomeMultiplier: number;       // Solomons: 1.15
+  truckCapacityBonus: number;         // Solomons: 5
+}
+
+/** Default modifiers (no family bonus). */
+export const DEFAULT_MODIFIERS: FamilyModifiers = {
+  buildingHpMultiplier: 1.0,
+  garrisonReductionBonus: 0,
+  influenceGainMultiplier: 1.0,
+  unitDpsMultiplier: 1.0,
+  coverDpsBonus: 0,
+  trainTimeMultiplier: 1.0,
+  unitCostMultiplier: 1.0,
+  cashIncomeMultiplier: 1.0,
+  truckCapacityBonus: 0,
+};
 
 export const FAMILIES: FamilyData[] = [
   {
@@ -25,6 +52,11 @@ export const FAMILIES: FamilyData[] = [
     ],
     color: 0xcc0000,
     accentColor: 0xff3333,
+    modifiers: {
+      ...DEFAULT_MODIFIERS,
+      buildingHpMultiplier: 1.15,
+      garrisonReductionBonus: 0.10,
+    },
   },
   {
     id: 'ashfords',
@@ -39,6 +71,12 @@ export const FAMILIES: FamilyData[] = [
     ],
     color: 0x0044cc,
     accentColor: 0x3377ff,
+    modifiers: {
+      ...DEFAULT_MODIFIERS,
+      influenceGainMultiplier: 1.20,
+      unitDpsMultiplier: 0.90,
+      coverDpsBonus: 0.05,
+    },
   },
   {
     id: 'korvaks',
@@ -53,6 +91,12 @@ export const FAMILIES: FamilyData[] = [
     ],
     color: 0x228b22,
     accentColor: 0x44cc44,
+    modifiers: {
+      ...DEFAULT_MODIFIERS,
+      trainTimeMultiplier: 0.88,
+      unitDpsMultiplier: 1.10,
+      unitCostMultiplier: 1.05,
+    },
   },
   {
     id: 'solomons',
@@ -67,5 +111,10 @@ export const FAMILIES: FamilyData[] = [
     ],
     color: 0xdaa520,
     accentColor: 0xffd700,
+    modifiers: {
+      ...DEFAULT_MODIFIERS,
+      cashIncomeMultiplier: 1.15,
+      truckCapacityBonus: 5,
+    },
   },
 ];
