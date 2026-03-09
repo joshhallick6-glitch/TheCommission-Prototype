@@ -1,17 +1,25 @@
 // ─── Game Configuration Constants ────────────────────────────────────────────
 
-export const TILE_SIZE = 32;
-export const MAP_WIDTH = 160;   // tiles
-export const MAP_HEIGHT = 160;  // tiles
-export const WORLD_WIDTH = MAP_WIDTH * TILE_SIZE;   // 5120px
-export const WORLD_HEIGHT = MAP_HEIGHT * TILE_SIZE;  // 5120px
+// Isometric tile dimensions (AoE2-style 2:1 diamond ratio)
+export const TILE_WIDTH = 64;    // Isometric tile width (horizontal span)
+export const TILE_HEIGHT = 32;   // Isometric tile height (vertical span)
+export const TILE_SIZE = 32;     // Legacy: used for pathfinding grid spacing
+
+export const MAP_WIDTH = 160;    // tiles
+export const MAP_HEIGHT = 160;   // tiles
+
+// Isometric world bounds: the diamond-shaped map projects into a larger rect
+// Width = (MAP_WIDTH + MAP_HEIGHT) * TILE_WIDTH / 2
+// Height = (MAP_WIDTH + MAP_HEIGHT) * TILE_HEIGHT / 2
+export const WORLD_WIDTH = (MAP_WIDTH + MAP_HEIGHT) * (TILE_WIDTH / 2);   // 10240px
+export const WORLD_HEIGHT = (MAP_WIDTH + MAP_HEIGHT) * (TILE_HEIGHT / 2); // 5120px
 
 export const VIEWPORT_WIDTH = 1280;
 export const VIEWPORT_HEIGHT = 720;
 
 export const CAMERA_SCROLL_SPEED = 12;
 export const CAMERA_EDGE_ZONE = 40;  // px from edge to trigger scroll
-export const CAMERA_ZOOM_MIN = 0.3;
+export const CAMERA_ZOOM_MIN = 0.25;
 export const CAMERA_ZOOM_MAX = 2.0;
 export const CAMERA_ZOOM_STEP = 0.1;
 
