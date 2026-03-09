@@ -73,9 +73,10 @@ export class Squad {
 
     // --- Visual setup ---
 
-    // Determine texture key: vehicles use 'vehicle_' prefix, infantry use 'unit_'
-    const texturePrefix = this.stats.isVehicle ? 'vehicle_' : 'unit_';
-    const textureKey = `${texturePrefix}${type}`;
+    // Determine texture key: BootScene generates 'unit-{type}' for all unit types
+    // (vehicles use the same 'unit-' prefix since BootScene.generateVehicleSprite
+    // uses `unit-${type}` regardless of isVehicle)
+    const textureKey = `unit-${type}`;
 
     const px = this.getPixelX();
     const py = this.getPixelY();
@@ -85,7 +86,7 @@ export class Squad {
       this.sprite = scene.add.sprite(px, py, textureKey);
     } else {
       // Generate a fallback texture: colored circle for infantry, rectangle for vehicles
-      const fallbackKey = `${textureKey}_fallback`;
+      const fallbackKey = `${textureKey}-fallback`;
       if (!scene.textures.exists(fallbackKey)) {
         const gfx = scene.add.graphics();
         if (this.stats.isVehicle) {

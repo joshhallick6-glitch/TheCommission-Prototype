@@ -16,18 +16,19 @@ import {
   CAMERA_ZOOM_MIN,
   CAMERA_ZOOM_MAX,
   CAMERA_ZOOM_STEP,
-  RETREAT_SPEED_MULTIPLIER,
   TIER_COSTS,
   STARTING_CASH,
   STARTING_GOODS,
   STARTING_INFLUENCE,
 } from '../data/config';
 import { UnitType, UNIT_DEFS } from '../data/units';
-import { BuildingType } from '../data/buildings';
 import { MapSystem } from '../systems/MapSystem';
 import { UnitSystem } from '../systems/UnitSystem';
 import { BuildingSystem } from '../systems/BuildingSystem';
 import { CombatSystem } from '../systems/CombatSystem';
+import { EconomySystem } from '../systems/EconomySystem';
+import { LogisticsSystem } from '../systems/LogisticsSystem';
+import { TerritorySystem } from '../systems/TerritorySystem';
 import { pathfinding } from '../utils/Pathfinding';
 import { EventBus, GameEvents } from '../utils/EventBus';
 
@@ -112,37 +113,16 @@ export class GameScene extends Phaser.Scene {
     this.combatSystem = new CombatSystem(this);
     this.combatSystem.setSquadLookup(this.unitSystem.squads);
 
-    // ── 6. Initialize economy system (stub if class doesn't exist) ──────
-    try {
-      // EconomySystem may not exist yet -- wrap in try/catch
-      const { EconomySystem } = require('../systems/EconomySystem');
-      this.economySystem = new EconomySystem(2, STARTING_CASH, STARTING_GOODS, STARTING_INFLUENCE);
-    } catch {
-      console.warn('GameScene: EconomySystem not found, economy features disabled');
-      this.economySystem = null;
-    }
+    // ── 6. Initialize economy system ────────────────────────────────────
+    this.economySystem = new EconomySystem(this, 2);
 
-    // ── 7. Initialize logistics system (stub if class doesn't exist) ────
-    try {
-      const { LogisticsSystem } = require('../systems/LogisticsSystem');
-      this.logisticsSystem = new LogisticsSystem(this);
-    } catch {
-      console.warn('GameScene: LogisticsSystem not found, logistics features disabled');
-      this.logisticsSystem = null;
-    }
+    // ── 7. Initialize logistics system ──────────────────────────────────
+    this.logisticsSystem = new LogisticsSystem(this);
 
-    // ── 8. Initialize territory system (stub if class doesn't exist) ────
-    try {
-      const { TerritorySystem } = require('../systems/TerritorySystem');
-      this.territorySystem = new TerritorySystem(this);
-      const corners = this.mapSystem.placeStreetCorners();
-      if (typeof this.territorySystem.initializeCorners === 'function') {
-        this.territorySystem.initializeCorners(corners);
-      }
-    } catch {
-      console.warn('GameScene: TerritorySystem not found, territory features disabled');
-      this.territorySystem = null;
-    }
+    // ── 8. Initialize territory system ──────────────────────────────────
+    this.territorySystem = new TerritorySystem(this);
+    const corners = this.mapSystem.placeStreetCorners();
+    this.territorySystem.initializeCorners(corners);
 
     // ── 9. Center camera on Player 0's compound ─────────────────────────
     const p0Compound = this.buildingSystem.getCompound(0);
@@ -500,7 +480,7 @@ export class GameScene extends Phaser.Scene {
     this.unitSystem.moveSelectedTo(targetTileX, targetTileY);
   }
 
-  private handleRetreat(): void {
+  handleRetreat(): void {
     if (this.unitSystem.selectedSquads.length === 0) return;
 
     for (const squad of this.unitSystem.selectedSquads) {
@@ -529,7 +509,7 @@ export class GameScene extends Phaser.Scene {
     EventBus.emit(GameEvents.RETREAT_ORDER);
   }
 
-  private handleGarrison(): void {
+  handleGarrison(): void {
     if (this.unitSystem.selectedSquads.length === 0) return;
 
     for (const squad of this.unitSystem.selectedSquads) {
@@ -563,20 +543,15 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  private handleTierAdvance(): void {
+  handleTierAdvance(): void {
     if (!this.economySystem) return;
 
-    // Check if player can afford tier advance
-    const currentTier = this.economySystem.getTier?.(0) ?? 1;
-    const nextTier = currentTier + 1;
-    const cost = TIER_COSTS[nextTier as keyof typeof TIER_COSTS];
-    if (!cost) return; // Already at max tier
-
-    if (typeof this.economySystem.canAffordTier === 'function') {
-      if (this.economySystem.canAffordTier(0, nextTier)) {
-        this.economySystem.startTierAdvance(0, nextTier);
-        EventBus.emit(GameEvents.TIER_RESEARCH_STARTED, 0, nextTier);
-      }
+    // EconomySystem.startTierResearch() checks tier, affordability, and
+    // deducts costs itself. Returns true if research was started.
+    const started = this.economySystem.startTierResearch(0);
+    if (started) {
+      const economy = this.economySystem.getPlayerEconomy(0);
+      EventBus.emit(GameEvents.TIER_RESEARCH_STARTED, 0, economy.tierResearchTarget);
     }
   }
 
@@ -613,14 +588,14 @@ export class GameScene extends Phaser.Scene {
     const unitDef = UNIT_DEFS[unitType];
 
     // Check tier requirement
-    const currentTier = this.economySystem?.getTier?.(0) ?? 1;
+    const currentTier = this.economySystem ? this.economySystem.getTier(0) : 1;
     if (unitDef.tier > currentTier) return;
 
     // Check if player can afford
     if (this.economySystem) {
-      const cash = this.economySystem.getCash?.(0) ?? STARTING_CASH;
+      const cash = this.economySystem.getCash(0);
       if (cash < unitDef.cost) return;
-      this.economySystem.spendCash?.(0, unitDef.cost);
+      this.economySystem.spendCash(0, unitDef.cost);
     }
 
     // Spawn the unit near the compound
@@ -633,7 +608,7 @@ export class GameScene extends Phaser.Scene {
     EventBus.emit(GameEvents.PRODUCE_UNIT, unitType, 0);
   }
 
-  private handleStopSelected(): void {
+  handleStopSelected(): void {
     for (const squad of this.unitSystem.selectedSquads) {
       squad.isMoving = false;
       squad.path = [];
@@ -681,16 +656,35 @@ export class GameScene extends Phaser.Scene {
     this.buildingSystem.update(delta);
     this.combatSystem.update(delta);
 
-    if (this.economySystem && typeof this.economySystem.update === 'function') {
-      this.economySystem.update(delta, this.buildingSystem);
+    if (this.economySystem) {
+      this.economySystem.update(
+        delta,
+        (owner: number) => this.buildingSystem.getBuildingsByOwner(owner),
+        (neighborhood: string, player: number) =>
+          this.territorySystem
+            ? this.territorySystem.getInfluenceMultiplier(neighborhood, player)
+            : 1.0,
+        (x: number, y: number) => this.mapSystem.getNeighborhoodAt(x, y),
+      );
     }
 
-    if (this.logisticsSystem && typeof this.logisticsSystem.update === 'function') {
-      this.logisticsSystem.update(delta, this.unitSystem, this.buildingSystem);
+    if (this.logisticsSystem) {
+      this.logisticsSystem.update(
+        delta,
+        (id: string) => this.unitSystem.squads.get(id) ?? null,
+        (id: string) => this.buildingSystem.buildings.get(id) ?? null,
+        (player: number, amount: number) => this.economySystem?.addGoods(player, amount),
+        () => Array.from(this.unitSystem.squads.values()),
+        () => Array.from(this.buildingSystem.buildings.values()),
+        this.time.now,
+      );
     }
 
-    if (this.territorySystem && typeof this.territorySystem.update === 'function') {
-      this.territorySystem.update(delta, this.unitSystem, this.buildingSystem);
+    if (this.territorySystem) {
+      this.territorySystem.update(
+        delta,
+        (x: number, y: number, radius: number) => this.unitSystem.getSquadsAt(x, y, radius),
+      );
     }
 
     // ── 4. Validate captures (check unit proximity) ─────────────────────

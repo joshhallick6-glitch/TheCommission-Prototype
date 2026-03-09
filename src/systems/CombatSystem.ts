@@ -157,7 +157,8 @@ export class CombatSystem {
           this.awardVeterancy(attacker);
           this.disengageAll(targetId);
 
-          EventBus.emit(GameEvents.SQUAD_WIPED, targetId, attackerId);
+          // Emit the actual squad object so UnitSystem can call squad.id
+          EventBus.emit(GameEvents.SQUAD_WIPED, target);
           EventBus.emit(GameEvents.UNIT_KILLED, targetId, attackerId);
 
           // Small screen-shake for nearby wipes

@@ -9,8 +9,6 @@ import {
   TILE_SIZE,
   MAP_WIDTH,
   MAP_HEIGHT,
-  WORLD_WIDTH,
-  WORLD_HEIGHT,
   PLAYER_COLORS,
   TIER_COSTS,
   STARTING_CASH,
@@ -18,7 +16,6 @@ import {
   STARTING_INFLUENCE,
 } from '../data/config';
 import { UnitType, UNIT_DEFS } from '../data/units';
-import { BuildingType, BUILDING_DEFS } from '../data/buildings';
 import { EventBus, GameEvents } from '../utils/EventBus';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -1024,29 +1021,32 @@ export class UIScene extends Phaser.Scene {
 
   private registerEventListeners(): void {
     // ── Economy events ──────────────────────────────────────────────────
-    EventBus.on(GameEvents.CASH_CHANGED, (playerIndex: number, amount: number) => {
-      if (playerIndex === 0) {
-        this.playerCash = amount;
+    // EconomySystem emits objects: { player, cash, delta }
+    EventBus.on(GameEvents.CASH_CHANGED, (data: { player: number; cash: number }) => {
+      if (data?.player === 0) {
+        this.playerCash = data.cash;
       }
     });
 
-    EventBus.on(GameEvents.GOODS_CHANGED, (playerIndex: number, amount: number) => {
-      if (playerIndex === 0) {
-        this.playerGoods = amount;
+    EventBus.on(GameEvents.GOODS_CHANGED, (data: { player: number; goods: number }) => {
+      if (data?.player === 0) {
+        this.playerGoods = data.goods;
       }
     });
 
-    EventBus.on(GameEvents.INFLUENCE_CHANGED, (playerIndex: number, amount: number) => {
-      if (playerIndex === 0) {
-        this.playerInfluence = amount;
+    EventBus.on(GameEvents.INFLUENCE_CHANGED, (data: { player: number; influence: number }) => {
+      if (data?.player === 0) {
+        this.playerInfluence = data.influence;
       }
     });
 
-    EventBus.on(GameEvents.INCOME_TICK, (playerIndex: number, cashRate: number, goodsRate: number, influenceRate: number) => {
-      if (playerIndex === 0) {
-        this.incomeRate = cashRate;
-        this.goodsRate = goodsRate;
-        this.influenceRate = influenceRate;
+    // EconomySystem emits: { players: [{ player, cash, goods, influence, incomePerMin }] }
+    EventBus.on(GameEvents.INCOME_TICK, (data: { players: Array<{ player: number; incomePerMin: number }> }) => {
+      if (!data?.players) return;
+      const p0 = data.players.find((p) => p.player === 0);
+      if (p0) {
+        this.incomeRate = p0.incomePerMin ?? 0;
+        // goodsRate and influenceRate are not in the tick payload; leave at 0
       }
     });
 
@@ -1084,8 +1084,11 @@ export class UIScene extends Phaser.Scene {
       this.pushAlert('Truck destroyed!', '#FF4444', true);
     });
 
-    EventBus.on(GameEvents.TIER_ADVANCED, (playerIndex: number, newTier: number) => {
-      if (playerIndex === 0) {
+    // EconomySystem emits: { player, newTier }
+    EventBus.on(GameEvents.TIER_ADVANCED, (data: { player: number; newTier: number }) => {
+      const playerIndex = data?.player ?? (typeof data === 'number' ? data : -1);
+      const newTier = data?.newTier ?? 0;
+      if (playerIndex === 0 && newTier > 0) {
         this.currentTier = newTier;
         this.pushAlert(`Tier ${newTier} reached!`, '#FFD700');
       }
