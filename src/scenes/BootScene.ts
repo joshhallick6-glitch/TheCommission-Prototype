@@ -1,14 +1,23 @@
 // ─── Boot Scene ─────────────────────────────────────────────────────────────
 // Runs first. Generates all game textures procedurally so no external assets
 // are required. Transitions to GameScene when finished.
+//
+// All terrain tiles are 64x32 isometric diamonds (2:1 ratio, AoE2-style).
+// Building sprites are isometric 3D boxes. Unit sprites are isometric-perspective.
 
 import Phaser from 'phaser';
-import { TILE_SIZE, TerrainType } from '../data/config';
+import { TILE_WIDTH, TILE_HEIGHT, TerrainType } from '../data/config';
 import { BUILDING_DEFS, BuildingType } from '../data/buildings';
 import { UNIT_DEFS, UnitType } from '../data/units';
 
 // Number of terrain tile indices in the generated tileset
 const TERRAIN_TILE_COUNT = 9; // one per TerrainType value (0-8)
+
+// Isometric diamond tile dimensions
+const TW = TILE_WIDTH;   // 64
+const TH = TILE_HEIGHT;  // 32
+const HALF_TW = TW / 2;  // 32
+const HALF_TH = TH / 2;  // 16
 
 export class BootScene extends Phaser.Scene {
   constructor() {
@@ -33,155 +42,183 @@ export class BootScene extends Phaser.Scene {
   // ── Terrain Tileset ─────────────────────────────────────────────────────────
 
   /**
-   * Generates a single tileset image containing one 32x32 tile per TerrainType,
-   * arranged in a horizontal strip. The tile index matches the TerrainType enum
-   * value, so the tilemap can reference tiles directly by terrain type.
+   * Generates a single tileset image containing one 64x32 isometric diamond
+   * tile per TerrainType, arranged in a horizontal strip. The tile index
+   * matches the TerrainType enum value, so the tilemap can reference tiles
+   * directly by terrain type.
+   *
+   * Each tile is a diamond: top=(32,0), right=(64,16), bottom=(32,32), left=(0,16).
+   * Pixels outside the diamond are transparent (alpha 0).
    */
   private generateTerrainTileset(): void {
-    const ts = TILE_SIZE;
+    const stripWidth = TW * TERRAIN_TILE_COUNT; // 576
     const canvas = this.textures.createCanvas(
       'terrain-tileset',
-      ts * TERRAIN_TILE_COUNT,
-      ts,
+      stripWidth,
+      TH,
     );
     if (!canvas) return;
 
     const ctx = canvas.context;
 
-    // Helper: draw a single tile at the correct x-offset
-    const drawTile = (index: number, drawFn: (x: number) => void): void => {
-      drawFn(index * ts);
+    // Clear entire strip to transparent
+    ctx.clearRect(0, 0, stripWidth, TH);
+
+    // Helper: clip to diamond shape at given x-offset, then run draw function
+    const drawDiamondTile = (
+      index: number,
+      fillColor: string,
+      borderColor: string,
+      detailFn?: (ctx: CanvasRenderingContext2D, x: number) => void,
+    ): void => {
+      const x = index * TW;
+
+      // Define diamond path
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(x + HALF_TW, 0);           // top
+      ctx.lineTo(x + TW, HALF_TH);          // right
+      ctx.lineTo(x + HALF_TW, TH);          // bottom
+      ctx.lineTo(x, HALF_TH);               // left
+      ctx.closePath();
+
+      // Clip to diamond -- only pixels inside will be drawn
+      ctx.clip();
+
+      // Fill the diamond
+      ctx.fillStyle = fillColor;
+      ctx.fillRect(x, 0, TW, TH);
+
+      // Draw any detail texture inside the diamond
+      if (detailFn) {
+        detailFn(ctx, x);
+      }
+
+      ctx.restore();
+
+      // Draw diamond border (outside clip so it's crisp on the edge)
+      ctx.strokeStyle = borderColor;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x + HALF_TW, 0);
+      ctx.lineTo(x + TW, HALF_TH);
+      ctx.lineTo(x + HALF_TW, TH);
+      ctx.lineTo(x, HALF_TH);
+      ctx.closePath();
+      ctx.stroke();
     };
 
-    // ROAD (0) -- dark gray
-    drawTile(TerrainType.ROAD, (x) => {
-      ctx.fillStyle = '#3a3a3a';
-      ctx.fillRect(x, 0, ts, ts);
-      // Subtle lane dashes
-      ctx.strokeStyle = '#4a4a4a';
-      ctx.setLineDash([4, 6]);
-      ctx.beginPath();
-      ctx.moveTo(x + ts / 2, 0);
-      ctx.lineTo(x + ts / 2, ts);
-      ctx.stroke();
-      ctx.setLineDash([]);
+    // ROAD (0) -- dark gray with subtle center line
+    drawDiamondTile(TerrainType.ROAD, '#444444', '#333333', (c, x) => {
+      c.strokeStyle = '#555555';
+      c.setLineDash([3, 4]);
+      c.lineWidth = 0.5;
+      // Diagonal center line (following iso diamond direction)
+      c.beginPath();
+      c.moveTo(x + HALF_TW - 8, HALF_TH - 4);
+      c.lineTo(x + HALF_TW + 8, HALF_TH + 4);
+      c.stroke();
+      c.setLineDash([]);
     });
 
-    // SIDEWALK (1) -- medium gray
-    drawTile(TerrainType.SIDEWALK, (x) => {
-      ctx.fillStyle = '#555555';
-      ctx.fillRect(x, 0, ts, ts);
-      // Grid lines for pavement texture
-      ctx.strokeStyle = '#606060';
-      ctx.lineWidth = 0.5;
-      ctx.strokeRect(x + 1, 1, ts - 2, ts - 2);
-      ctx.beginPath();
-      ctx.moveTo(x + ts / 2, 0);
-      ctx.lineTo(x + ts / 2, ts);
-      ctx.stroke();
-      ctx.lineWidth = 1;
-    });
-
-    // BUILDING_FLOOR (2) -- dark brown
-    drawTile(TerrainType.BUILDING_FLOOR, (x) => {
-      ctx.fillStyle = '#2a1f14';
-      ctx.fillRect(x, 0, ts, ts);
-      // Subtle plank lines
-      ctx.strokeStyle = '#332618';
-      ctx.lineWidth = 0.5;
-      for (let i = 0; i < ts; i += 8) {
-        ctx.beginPath();
-        ctx.moveTo(x, i);
-        ctx.lineTo(x + ts, i);
-        ctx.stroke();
+    // SIDEWALK (1) -- medium gray with subtle grid
+    drawDiamondTile(TerrainType.SIDEWALK, '#666666', '#555555', (c, x) => {
+      c.strokeStyle = '#737373';
+      c.lineWidth = 0.3;
+      // Draw a cross-hatch pattern inside the diamond
+      for (let i = 0; i < TW; i += 16) {
+        c.beginPath();
+        c.moveTo(x + i, 0);
+        c.lineTo(x + i, TH);
+        c.stroke();
       }
-      ctx.lineWidth = 1;
-    });
-
-    // WALL (3) -- dark brown-black with 1px lighter border
-    drawTile(TerrainType.WALL, (x) => {
-      ctx.fillStyle = '#1a1208';
-      ctx.fillRect(x, 0, ts, ts);
-      ctx.strokeStyle = '#3a2a18';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(x + 0.5, 0.5, ts - 1, ts - 1);
-    });
-
-    // ALLEY (4) -- darker gray with subtle dashed center line
-    drawTile(TerrainType.ALLEY, (x) => {
-      ctx.fillStyle = '#2a2a2a';
-      ctx.fillRect(x, 0, ts, ts);
-      ctx.strokeStyle = '#444444';
-      ctx.setLineDash([3, 5]);
-      ctx.beginPath();
-      ctx.moveTo(x + ts / 2, 0);
-      ctx.lineTo(x + ts / 2, ts);
-      ctx.stroke();
-      ctx.setLineDash([]);
-    });
-
-    // PARK (5) -- dark green
-    drawTile(TerrainType.PARK, (x) => {
-      ctx.fillStyle = '#1a3a1a';
-      ctx.fillRect(x, 0, ts, ts);
-      // A few lighter "grass tufts"
-      ctx.fillStyle = '#255a25';
-      ctx.fillRect(x + 6, 8, 3, 3);
-      ctx.fillRect(x + 20, 14, 3, 3);
-      ctx.fillRect(x + 12, 24, 3, 3);
-    });
-
-    // WATER (6) -- dark blue
-    drawTile(TerrainType.WATER, (x) => {
-      ctx.fillStyle = '#1a2a4a';
-      ctx.fillRect(x, 0, ts, ts);
-      // Wave lines
-      ctx.strokeStyle = '#2a3a5a';
-      ctx.lineWidth = 0.5;
-      for (let i = 8; i < ts; i += 10) {
-        ctx.beginPath();
-        ctx.moveTo(x, i);
-        ctx.quadraticCurveTo(x + ts / 4, i - 3, x + ts / 2, i);
-        ctx.quadraticCurveTo(x + (3 * ts) / 4, i + 3, x + ts, i);
-        ctx.stroke();
-      }
-      ctx.lineWidth = 1;
-    });
-
-    // BRIDGE (7) -- gray-brown with rail lines
-    drawTile(TerrainType.BRIDGE, (x) => {
-      ctx.fillStyle = '#4a4a3a';
-      ctx.fillRect(x, 0, ts, ts);
-      // Rails on each side
-      ctx.strokeStyle = '#6a6a5a';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(x + 4, 0);
-      ctx.lineTo(x + 4, ts);
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.moveTo(x + ts - 4, 0);
-      ctx.lineTo(x + ts - 4, ts);
-      ctx.stroke();
-      // Cross planks
-      ctx.lineWidth = 1;
-      for (let i = 4; i < ts; i += 8) {
-        ctx.beginPath();
-        ctx.moveTo(x + 4, i);
-        ctx.lineTo(x + ts - 4, i);
-        ctx.stroke();
+      for (let i = 0; i < TH; i += 8) {
+        c.beginPath();
+        c.moveTo(x, i);
+        c.lineTo(x + TW, i);
+        c.stroke();
       }
     });
 
-    // COVER_OBJECT (8) -- tan (cars, crates, sandbags)
-    drawTile(TerrainType.COVER_OBJECT, (x) => {
-      ctx.fillStyle = '#555555'; // road underneath
-      ctx.fillRect(x, 0, ts, ts);
-      // The cover object itself
-      ctx.fillStyle = '#8a7a5a';
-      ctx.fillRect(x + 4, 4, ts - 8, ts - 8);
-      ctx.strokeStyle = '#6a5a3a';
-      ctx.strokeRect(x + 4, 4, ts - 8, ts - 8);
+    // BUILDING_FLOOR (2) -- grey
+    drawDiamondTile(TerrainType.BUILDING_FLOOR, '#555555', '#444444', (c, x) => {
+      // Subtle plank lines following iso direction
+      c.strokeStyle = '#4a4a4a';
+      c.lineWidth = 0.4;
+      for (let i = 4; i < TH; i += 6) {
+        c.beginPath();
+        c.moveTo(x, i);
+        c.lineTo(x + TW, i);
+        c.stroke();
+      }
+    });
+
+    // WALL (3) -- dark with lighter border
+    drawDiamondTile(TerrainType.WALL, '#333333', '#4a4a4a');
+
+    // ALLEY (4) -- very dark with dashed center
+    drawDiamondTile(TerrainType.ALLEY, '#3a3a3a', '#2a2a2a', (c, x) => {
+      c.strokeStyle = '#505050';
+      c.setLineDash([2, 4]);
+      c.lineWidth = 0.5;
+      c.beginPath();
+      c.moveTo(x + HALF_TW - 10, HALF_TH - 5);
+      c.lineTo(x + HALF_TW + 10, HALF_TH + 5);
+      c.stroke();
+      c.setLineDash([]);
+    });
+
+    // PARK (5) -- dark green with grass tufts
+    drawDiamondTile(TerrainType.PARK, '#2d5a1e', '#1e4a12', (c, x) => {
+      c.fillStyle = '#3a7a28';
+      // Small grass tuft dots scattered inside diamond
+      c.fillRect(x + 20, 10, 3, 2);
+      c.fillRect(x + 38, 14, 3, 2);
+      c.fillRect(x + 28, 22, 3, 2);
+      c.fillRect(x + 44, 8, 2, 2);
+      c.fillRect(x + 14, 18, 2, 2);
+    });
+
+    // WATER (6) -- dark blue with wave lines
+    drawDiamondTile(TerrainType.WATER, '#1a3a5c', '#143050', (c, x) => {
+      c.strokeStyle = '#2a4a6c';
+      c.lineWidth = 0.5;
+      for (let i = 8; i < TH; i += 8) {
+        c.beginPath();
+        c.moveTo(x + 8, i);
+        c.quadraticCurveTo(x + HALF_TW / 2, i - 2, x + HALF_TW, i);
+        c.quadraticCurveTo(x + HALF_TW + HALF_TW / 2, i + 2, x + TW - 8, i);
+        c.stroke();
+      }
+    });
+
+    // BRIDGE (7) -- brown with cross planks
+    drawDiamondTile(TerrainType.BRIDGE, '#5a4a3a', '#4a3a2a', (c, x) => {
+      c.strokeStyle = '#6a5a4a';
+      c.lineWidth = 1;
+      // Cross planks following iso direction
+      for (let i = 6; i < TW - 6; i += 10) {
+        c.beginPath();
+        c.moveTo(x + i, HALF_TH - 6);
+        c.lineTo(x + i, HALF_TH + 6);
+        c.stroke();
+      }
+    });
+
+    // COVER_OBJECT (8) -- olive/brown with object rectangle
+    drawDiamondTile(TerrainType.COVER_OBJECT, '#4a4a2a', '#3a3a1a', (c, x) => {
+      // Small isometric box shape in the center representing the cover object
+      c.fillStyle = '#6a6a3a';
+      c.beginPath();
+      c.moveTo(x + HALF_TW, HALF_TH - 6);
+      c.lineTo(x + HALF_TW + 10, HALF_TH - 1);
+      c.lineTo(x + HALF_TW, HALF_TH + 4);
+      c.lineTo(x + HALF_TW - 10, HALF_TH - 1);
+      c.closePath();
+      c.fill();
+      c.strokeStyle = '#5a5a2a';
+      c.lineWidth = 0.5;
+      c.stroke();
     });
 
     canvas.refresh();
@@ -203,69 +240,119 @@ export class BootScene extends Phaser.Scene {
   }
 
   /**
-   * Infantry: colored circles arranged in a small formation.
-   * Canvas is sized to fit all members in a loose cluster.
+   * Infantry: isometric-perspective figure. Ellipse body (wider than tall to
+   * match iso view) with a head circle on top. Each squad member is ~16x20px,
+   * arranged in a formation cluster.
    */
   private generateInfantrySprite(
     type: string,
     color: number,
     squadSize: number,
   ): void {
-    const memberDiameter = 8;
-    const spacing = 10;
+    // Each member figure is 16 wide x 20 tall
+    const memberW = 16;
+    const memberH = 20;
+    const spacing = 14;
+
     // Arrange in a small grid (max 2 columns)
     const cols = Math.min(squadSize, 2);
     const rows = Math.ceil(squadSize / cols);
-    const w = cols * spacing + memberDiameter;
-    const h = rows * spacing + memberDiameter;
+    const totalW = cols * spacing + memberW;
+    const totalH = rows * spacing + memberH;
 
     const gfx = this.make.graphics({ x: 0, y: 0 }, false);
-    const r = memberDiameter / 2;
-    const hexColor = color;
 
     for (let i = 0; i < squadSize; i++) {
       const col = i % cols;
       const row = Math.floor(i / cols);
-      const cx = r + col * spacing;
-      const cy = r + row * spacing;
-      gfx.fillStyle(hexColor, 1);
-      gfx.fillCircle(cx, cy, r);
-      // Darker outline
-      gfx.lineStyle(1, darkenColor(hexColor, 0.5), 1);
-      gfx.strokeCircle(cx, cy, r);
+      const cx = memberW / 2 + col * spacing;
+      const cy = memberH / 2 + row * spacing + 4; // offset down for head
+
+      // Body: ellipse (wider than tall for iso perspective)
+      gfx.fillStyle(color, 1);
+      gfx.fillEllipse(cx, cy + 2, 12, 8);
+      gfx.lineStyle(1, darkenColor(color, 0.5), 1);
+      gfx.strokeEllipse(cx, cy + 2, 12, 8);
+
+      // Head: small circle above body
+      gfx.fillStyle(lightenColor(color, 0.3), 1);
+      gfx.fillCircle(cx, cy - 5, 3);
+      gfx.lineStyle(1, darkenColor(color, 0.4), 1);
+      gfx.strokeCircle(cx, cy - 5, 3);
     }
 
-    // Directional indicator: small triangle at the top-center
-    const triX = w / 2;
-    const triY = -2;
+    // Directional indicator: small triangle at top-center
+    const triX = totalW / 2;
     gfx.fillStyle(0xffffff, 0.8);
-    gfx.fillTriangle(triX, triY, triX - 3, triY + 5, triX + 3, triY + 5);
+    gfx.fillTriangle(triX, 0, triX - 3, 5, triX + 3, 5);
 
-    gfx.generateTexture(`unit-${type}`, w, h);
+    gfx.generateTexture(`unit-${type}`, totalW, totalH);
     gfx.destroy();
   }
 
   /**
-   * Vehicles: colored rectangles with a directional triangle.
-   * Cars: 16x10, Trucks: 20x12
+   * Vehicles: isometric parallelogram shape with visible top face.
+   * Trucks: 36x24, Cars: 32x20.
    */
   private generateVehicleSprite(type: string, color: number): void {
     const isTruck =
       type === UnitType.DELIVERY_TRUCK || type === UnitType.ARMORED_TRUCK;
-    const vw = isTruck ? 20 : 16;
-    const vh = isTruck ? 12 : 10;
+    const vw = isTruck ? 36 : 32;
+    const vh = isTruck ? 24 : 20;
 
     const gfx = this.make.graphics({ x: 0, y: 0 }, false);
 
-    // Body
-    gfx.fillStyle(color, 1);
-    gfx.fillRect(0, 0, vw, vh);
-    gfx.lineStyle(1, darkenColor(color, 0.5), 1);
-    gfx.strokeRect(0, 0, vw, vh);
+    // Top face (lighter, diamond/parallelogram shape)
+    const topColor = lightenColor(color, 0.25);
+    gfx.fillStyle(topColor, 1);
+    gfx.beginPath();
+    gfx.moveTo(vw / 2, 0);                    // top
+    gfx.moveTo(vw * 0.15, vh * 0.25);         // left
+    gfx.lineTo(vw * 0.5, vh * 0.05);          // top
+    gfx.lineTo(vw * 0.85, vh * 0.25);         // right
+    gfx.lineTo(vw * 0.5, vh * 0.45);          // bottom
+    gfx.closePath();
+    gfx.fillPath();
 
-    // Directional indicator (front triangle)
+    // Right side (darker shade)
+    const rightColor = darkenColor(color, 0.6);
+    gfx.fillStyle(rightColor, 1);
+    gfx.beginPath();
+    gfx.moveTo(vw * 0.85, vh * 0.25);
+    gfx.lineTo(vw * 0.5, vh * 0.45);
+    gfx.lineTo(vw * 0.5, vh * 0.75);
+    gfx.lineTo(vw * 0.85, vh * 0.55);
+    gfx.closePath();
+    gfx.fillPath();
+
+    // Left side (medium shade)
+    gfx.fillStyle(color, 1);
+    gfx.beginPath();
+    gfx.moveTo(vw * 0.15, vh * 0.25);
+    gfx.lineTo(vw * 0.5, vh * 0.45);
+    gfx.lineTo(vw * 0.5, vh * 0.75);
+    gfx.lineTo(vw * 0.15, vh * 0.55);
+    gfx.closePath();
+    gfx.fillPath();
+
+    // Outline
+    gfx.lineStyle(1, darkenColor(color, 0.4), 1);
+    // Top face outline
+    gfx.beginPath();
+    gfx.moveTo(vw * 0.15, vh * 0.25);
+    gfx.lineTo(vw * 0.5, vh * 0.05);
+    gfx.lineTo(vw * 0.85, vh * 0.25);
+    gfx.lineTo(vw * 0.5, vh * 0.45);
+    gfx.closePath();
+    gfx.strokePath();
+
+    // Directional indicator (front -- lower-right, pointing to iso-right)
     gfx.fillStyle(0xffffff, 0.8);
-    gfx.fillTriangle(vw, vh / 2, vw - 4, vh / 2 - 3, vw - 4, vh / 2 + 3);
+    gfx.fillTriangle(
+      vw * 0.85, vh * 0.25,
+      vw * 0.75, vh * 0.18,
+      vw * 0.75, vh * 0.32,
+    );
 
     gfx.generateTexture(`unit-${type}`, vw, vh);
     gfx.destroy();
@@ -273,50 +360,127 @@ export class BootScene extends Phaser.Scene {
 
   // ── Building Sprites ────────────────────────────────────────────────────────
 
+  /**
+   * Generates isometric 3D box building sprites. Each building has:
+   * - TOP face: diamond in lighter shade of building color
+   * - LEFT wall: parallelogram in base color (medium shade)
+   * - RIGHT wall: parallelogram in darker shade
+   *
+   * The diamond base is (widthTiles * TILE_WIDTH) x (heightTiles * TILE_HEIGHT).
+   * Walls extend downward to give a 3D height illusion.
+   */
   private generateBuildingSprites(): void {
     for (const bType of Object.values(BuildingType)) {
       const def = BUILDING_DEFS[bType];
       if (!def) continue;
 
-      const w = def.widthTiles * TILE_SIZE;
-      const h = def.heightTiles * TILE_SIZE;
+      // Isometric diamond dimensions for this building
+      const isoW = def.widthTiles * TW;     // e.g. 2 tiles = 128px wide
+      const isoH = def.heightTiles * TH;    // e.g. 2 tiles = 64px tall
+      const halfW = isoW / 2;
+      const halfH = isoH / 2;
+
+      // Wall height in pixels (taller buildings get more wall depth)
+      const wallHeight = Math.max(16, Math.min(32, def.widthTiles * 8));
+
+      // Total sprite size: diamond + wall extension below
+      const spriteW = isoW;
+      const spriteH = isoH + wallHeight;
 
       const gfx = this.make.graphics({ x: 0, y: 0 }, false);
 
-      // Fill
+      // Diamond top-face corners (centered horizontally at halfW, top at 0)
+      const topX = halfW;
+      const topY = 0;
+      const rightX = isoW;
+      const rightY = halfH;
+      const bottomX = halfW;
+      const bottomY = isoH;
+      const leftX = 0;
+      const leftY = halfH;
+
+      // ── LEFT wall (medium shade) ──────────────────────────────────────
       gfx.fillStyle(def.color, 1);
-      gfx.fillRect(0, 0, w, h);
+      gfx.beginPath();
+      gfx.moveTo(leftX, leftY);
+      gfx.lineTo(bottomX, bottomY);
+      gfx.lineTo(bottomX, bottomY + wallHeight);
+      gfx.lineTo(leftX, leftY + wallHeight);
+      gfx.closePath();
+      gfx.fillPath();
 
-      // 2px border, slightly lighter
-      gfx.lineStyle(2, lightenColor(def.color, 0.3), 1);
-      gfx.strokeRect(1, 1, w - 2, h - 2);
+      // ── RIGHT wall (darker shade) ─────────────────────────────────────
+      gfx.fillStyle(darkenColor(def.color, 0.6), 1);
+      gfx.beginPath();
+      gfx.moveTo(rightX, rightY);
+      gfx.lineTo(bottomX, bottomY);
+      gfx.lineTo(bottomX, bottomY + wallHeight);
+      gfx.lineTo(rightX, rightY + wallHeight);
+      gfx.closePath();
+      gfx.fillPath();
 
-      // Center letter identifying the building type
-      gfx.generateTexture(`building-${bType}`, w, h);
+      // ── TOP face (lighter shade diamond) ──────────────────────────────
+      gfx.fillStyle(lightenColor(def.color, 0.3), 1);
+      gfx.beginPath();
+      gfx.moveTo(topX, topY);
+      gfx.lineTo(rightX, rightY);
+      gfx.lineTo(bottomX, bottomY);
+      gfx.lineTo(leftX, leftY);
+      gfx.closePath();
+      gfx.fillPath();
+
+      // ── Outlines ──────────────────────────────────────────────────────
+      gfx.lineStyle(1, darkenColor(def.color, 0.4), 1);
+
+      // Top face outline
+      gfx.beginPath();
+      gfx.moveTo(topX, topY);
+      gfx.lineTo(rightX, rightY);
+      gfx.lineTo(bottomX, bottomY);
+      gfx.lineTo(leftX, leftY);
+      gfx.closePath();
+      gfx.strokePath();
+
+      // Left wall outline
+      gfx.beginPath();
+      gfx.moveTo(leftX, leftY);
+      gfx.lineTo(leftX, leftY + wallHeight);
+      gfx.lineTo(bottomX, bottomY + wallHeight);
+      gfx.lineTo(bottomX, bottomY);
+      gfx.strokePath();
+
+      // Right wall outline
+      gfx.beginPath();
+      gfx.moveTo(rightX, rightY);
+      gfx.lineTo(rightX, rightY + wallHeight);
+      gfx.lineTo(bottomX, bottomY + wallHeight);
+      gfx.lineTo(bottomX, bottomY);
+      gfx.strokePath();
+
+      gfx.generateTexture(`building-${bType}`, spriteW, spriteH);
       gfx.destroy();
 
-      // We cannot easily draw text with Graphics, so stamp a letter via
-      // a canvas texture overlay.
-      this.addBuildingLabel(bType, w, h, def.color);
+      // Stamp identifying label on the top face
+      this.addBuildingLabel(bType, spriteW, spriteH, halfW, halfH, def.color);
     }
   }
 
   /**
-   * Draws a single identifying letter on top of the building texture using
-   * a CanvasTexture so we get real text rendering.
+   * Draws a short identifying label on the building's top face using a
+   * CanvasTexture for real text rendering.
    */
   private addBuildingLabel(
     type: string,
     w: number,
     h: number,
+    centerX: number,
+    centerY: number,
     bgColor: number,
   ): void {
     const key = `building-${type}`;
-    // The texture already exists from generateTexture; get its canvas
     const tex = this.textures.get(key);
     if (!tex || tex.key === '__MISSING') return;
 
-    // Create a temporary canvas and composite the letter
     const canvas = this.textures.createCanvas(`${key}-tmp`, w, h);
     if (!canvas) return;
     const ctx = canvas.context;
@@ -333,7 +497,8 @@ export class BootScene extends Phaser.Scene {
     ctx.textBaseline = 'middle';
 
     const label = getBuildingLabel(type);
-    ctx.fillText(label, w / 2, h / 2);
+    // Place text at the center of the top diamond face
+    ctx.fillText(label, centerX, centerY);
 
     canvas.refresh();
 
@@ -345,10 +510,10 @@ export class BootScene extends Phaser.Scene {
   // ── UI Elements ─────────────────────────────────────────────────────────────
 
   private generateUIElements(): void {
-    // Selection circle (green ring, 32px)
-    this.makeGraphicTexture('ui-selection', 32, 32, (gfx) => {
+    // Selection ellipse (green ring, wider than tall for iso perspective)
+    this.makeGraphicTexture('ui-selection', 48, 28, (gfx) => {
       gfx.lineStyle(2, 0x00ff00, 0.8);
-      gfx.strokeCircle(16, 16, 14);
+      gfx.strokeEllipse(24, 14, 44, 24);
     });
 
     // Health bar background (red, 24x4)
@@ -369,11 +534,16 @@ export class BootScene extends Phaser.Scene {
       gfx.fillRect(0, 0, 32, 4);
     });
 
-    // Street corner marker (small diamond, 12x12)
-    this.makeGraphicTexture('ui-corner-marker', 12, 12, (gfx) => {
+    // Street corner marker (small iso diamond, 12x8)
+    this.makeGraphicTexture('ui-corner-marker', 12, 8, (gfx) => {
       gfx.fillStyle(0xffcc00, 0.9);
-      gfx.fillTriangle(6, 0, 12, 6, 6, 12);
-      gfx.fillTriangle(6, 0, 0, 6, 6, 12);
+      gfx.beginPath();
+      gfx.moveTo(6, 0);   // top
+      gfx.lineTo(12, 4);  // right
+      gfx.lineTo(6, 8);   // bottom
+      gfx.lineTo(0, 4);   // left
+      gfx.closePath();
+      gfx.fillPath();
     });
 
     // Minimap frame (4px border, 200x200 -- just the border texture)

@@ -33,13 +33,26 @@ const MAX_ALERTS = 5;
 // Resource bar dimensions
 const RESOURCE_BAR_HEIGHT = 40;
 
-// Selection panel dimensions
-const SELECTION_PANEL_WIDTH = 400;
-const SELECTION_PANEL_HEIGHT = 150;
+// Bottom bar dimensions (AoE2-style unified bottom panel)
+const BOTTOM_BAR_HEIGHT = 180;
+const BOTTOM_BAR_Y = VIEWPORT_HEIGHT - BOTTOM_BAR_HEIGHT;
 
-// Action bar dimensions
-const ACTION_BAR_WIDTH = 300;
-const ACTION_BAR_HEIGHT = 150;
+// Info panel (center of bottom bar, between minimap and command panel)
+const INFO_PANEL_X = MINIMAP_SIZE + 20;
+const INFO_PANEL_WIDTH = VIEWPORT_WIDTH - MINIMAP_SIZE - 320 - 30; // ~530px
+
+// Command panel (right side of bottom bar)
+const COMMAND_PANEL_WIDTH = 310;
+const COMMAND_PANEL_X = VIEWPORT_WIDTH - COMMAND_PANEL_WIDTH - 5;
+
+// Unit grid (multi-select)
+const GRID_ICON_SIZE = 36;
+const GRID_ICON_GAP = 4;
+const GRID_COLS = 12;
+const GRID_ROWS = 3;
+
+// Portrait (single-select)
+const PORTRAIT_SIZE = 64;
 
 // ─── Alert entry ────────────────────────────────────────────────────────────
 
@@ -91,17 +104,30 @@ export class UIScene extends Phaser.Scene {
   private minimapLastUpdate: number = 0;
   private minimapExpanded: boolean = false;
 
-  // Minimap position & size
-  private minimapX: number = 10;
-  private minimapY: number = VIEWPORT_HEIGHT - MINIMAP_SIZE - 10;
+  // Minimap position & size (inside the unified bottom bar)
+  private minimapX: number = 5;
+  private minimapY: number = VIEWPORT_HEIGHT - BOTTOM_BAR_HEIGHT + (BOTTOM_BAR_HEIGHT - MINIMAP_SIZE) / 2 + 2;
+
+  // ── Bottom bar (unified AoE2-style) ──────────────────────────────────
+  private bottomBarBg!: Phaser.GameObjects.Rectangle;
+  private bottomBarBorder!: Phaser.GameObjects.Graphics;
 
   // ── Selection panel elements ──────────────────────────────────────────
   private selectionPanelBg!: Phaser.GameObjects.Rectangle;
   private selectionTexts: Phaser.GameObjects.Text[] = [];
+  private selectionGraphics: Phaser.GameObjects.GameObject[] = [];
   private selectionHpBar!: Phaser.GameObjects.Graphics;
   private currentSelection: any = null;
   private selectionType: 'none' | 'unit' | 'building' | 'multi' = 'none';
   private multiSelection: any[] = [];
+
+  // ── Unit grid icons (multi-select, AoE2-style) ────────────────────────
+  private unitGridIcons: {
+    bg: Phaser.GameObjects.Rectangle;
+    hpBar: Phaser.GameObjects.Graphics;
+    border: Phaser.GameObjects.Rectangle;
+    squad: any;
+  }[] = [];
 
   // ── Action bar elements ───────────────────────────────────────────────
   private actionBarBg!: Phaser.GameObjects.Rectangle;
@@ -109,6 +135,22 @@ export class UIScene extends Phaser.Scene {
 
   // ── Alerts ────────────────────────────────────────────────────────────
   private alerts: AlertEntry[] = [];
+
+  // ── Game Timer (Feature 3) ──────────────────────────────────────────
+  private gameTimer: number = 0;
+  private timerText!: Phaser.GameObjects.Text;
+
+  // ── Game Speed Display (Feature 5) ──────────────────────────────────
+  private gameSpeedText!: Phaser.GameObjects.Text;
+  private currentGameSpeed: number = 1.0;
+
+  // ── Pause Overlay (Feature 4) ──────────────────────────────────────
+  private pauseOverlay!: Phaser.GameObjects.Text;
+  private isPaused: boolean = false;
+
+  // ── Production Queue UI (Feature 1) ────────────────────────────────
+  private productionQueueTexts: Phaser.GameObjects.Text[] = [];
+  private productionProgressBar!: Phaser.GameObjects.Graphics;
 
   constructor() {
     super({ key: 'UIScene' });
@@ -127,9 +169,13 @@ export class UIScene extends Phaser.Scene {
 
     // Build all UI panels
     this.createResourceBar();
+    this.createBottomBar();
     this.createMinimap();
     this.createSelectionPanel();
     this.createActionBar();
+    this.createTimerDisplay();
+    this.createPauseOverlay();
+    this.createProductionQueueUI();
 
     // Register event listeners
     this.registerEventListeners();
@@ -255,6 +301,45 @@ export class UIScene extends Phaser.Scene {
       this.tierButtonLabel.setText('MAX TIER');
       this.tierButton.setFillStyle(0x333333, 0.9);
     }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // BOTTOM BAR (unified AoE2-style panel)
+  // ═══════════════════════════════════════════════════════════════════════
+
+  private createBottomBar(): void {
+    // Full-width dark background for the bottom panel
+    this.bottomBarBg = this.add.rectangle(
+      VIEWPORT_WIDTH / 2,
+      BOTTOM_BAR_Y + BOTTOM_BAR_HEIGHT / 2,
+      VIEWPORT_WIDTH,
+      BOTTOM_BAR_HEIGHT,
+      0x0d0d0d,
+      0.92,
+    );
+    this.bottomBarBg.setDepth(UI_DEPTH - 1);
+
+    // Decorative top border (gold line like AoE2)
+    this.bottomBarBorder = this.add.graphics();
+    this.bottomBarBorder.setDepth(UI_DEPTH + 3);
+    this.bottomBarBorder.lineStyle(2, 0x8B7355, 0.8);
+    this.bottomBarBorder.lineBetween(0, BOTTOM_BAR_Y, VIEWPORT_WIDTH, BOTTOM_BAR_Y);
+    // Subtle inner line
+    this.bottomBarBorder.lineStyle(1, 0x444444, 0.4);
+    this.bottomBarBorder.lineBetween(0, BOTTOM_BAR_Y + 2, VIEWPORT_WIDTH, BOTTOM_BAR_Y + 2);
+
+    // Vertical divider after minimap
+    this.bottomBarBorder.lineStyle(1, 0x555555, 0.6);
+    this.bottomBarBorder.lineBetween(
+      MINIMAP_SIZE + 15, BOTTOM_BAR_Y + 5,
+      MINIMAP_SIZE + 15, VIEWPORT_HEIGHT - 5,
+    );
+
+    // Vertical divider before command panel
+    this.bottomBarBorder.lineBetween(
+      COMMAND_PANEL_X - 5, BOTTOM_BAR_Y + 5,
+      COMMAND_PANEL_X - 5, VIEWPORT_HEIGHT - 5,
+    );
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -471,20 +556,9 @@ export class UIScene extends Phaser.Scene {
   // ═══════════════════════════════════════════════════════════════════════
 
   private createSelectionPanel(): void {
-    const panelX = this.minimapX + MINIMAP_SIZE + 15;
-    const panelY = VIEWPORT_HEIGHT - SELECTION_PANEL_HEIGHT - 10;
-
-    // Background
-    this.selectionPanelBg = this.add.rectangle(
-      panelX + SELECTION_PANEL_WIDTH / 2,
-      panelY + SELECTION_PANEL_HEIGHT / 2,
-      SELECTION_PANEL_WIDTH,
-      SELECTION_PANEL_HEIGHT,
-      PANEL_BG_COLOR,
-      PANEL_BG_ALPHA,
-    );
-    this.selectionPanelBg.setStrokeStyle(1, PANEL_BORDER_COLOR, 0.8);
-    this.selectionPanelBg.setDepth(UI_DEPTH);
+    // The selection panel sits in the center of the bottom bar (no separate bg needed,
+    // the unified bottom bar provides the background)
+    this.selectionPanelBg = this.add.rectangle(0, 0, 1, 1, 0, 0);
     this.selectionPanelBg.setVisible(false);
 
     // HP bar graphics
@@ -494,210 +568,311 @@ export class UIScene extends Phaser.Scene {
   }
 
   private updateSelectionPanel(): void {
-    // Clear previous text elements
+    // Clear previous elements
     for (const text of this.selectionTexts) {
       text.destroy();
     }
     this.selectionTexts = [];
+    for (const gfx of this.selectionGraphics) {
+      gfx.destroy();
+    }
+    this.selectionGraphics = [];
+    this.clearUnitGrid();
     this.selectionHpBar.clear();
     this.selectionHpBar.setVisible(false);
 
-    const panelX = this.minimapX + MINIMAP_SIZE + 15;
-    const panelY = VIEWPORT_HEIGHT - SELECTION_PANEL_HEIGHT - 10;
+    const panelX = INFO_PANEL_X;
+    const panelY = BOTTOM_BAR_Y + 8;
+    const panelW = INFO_PANEL_WIDTH;
 
     const gameScene = this.gameScene as any;
     const unitSystem = gameScene?.unitSystem;
     const selected = unitSystem?.selectedSquads ?? [];
-
-    // Check for selected building
     const selectedBuilding = gameScene?.selectedBuilding;
 
     if (selected.length === 1) {
-      // ── Single unit selected ──────────────────────────────────────────
+      // ══════════════════════════════════════════════════════════════════
+      // SINGLE UNIT — AoE2-style portrait + stats
+      // ══════════════════════════════════════════════════════════════════
       this.selectionType = 'unit';
       this.currentSelection = selected[0];
-      this.selectionPanelBg.setVisible(true);
 
       const squad = selected[0];
       const stats = squad.stats;
 
-      // Unit name and type
-      const nameText = this.add.text(panelX + 10, panelY + 10, `${stats.name}`, {
-        fontSize: '16px',
-        fontFamily: FONT_FAMILY,
-        color: '#FFFFFF',
-        fontStyle: 'bold',
+      // ── Portrait box (left side) ──────────────────────────────────────
+      const portraitX = panelX + 5;
+      const portraitY = panelY + 5;
+      const portraitBorder = this.add.rectangle(
+        portraitX + PORTRAIT_SIZE / 2,
+        portraitY + PORTRAIT_SIZE / 2,
+        PORTRAIT_SIZE + 4, PORTRAIT_SIZE + 4,
+        0x222222, 0.9,
+      );
+      portraitBorder.setStrokeStyle(2, 0x8B7355, 0.9);
+      portraitBorder.setDepth(UI_DEPTH + 1);
+      this.selectionGraphics.push(portraitBorder);
+
+      // Portrait fill (unit color)
+      const portrait = this.add.rectangle(
+        portraitX + PORTRAIT_SIZE / 2,
+        portraitY + PORTRAIT_SIZE / 2,
+        PORTRAIT_SIZE, PORTRAIT_SIZE,
+        stats.color, 0.7,
+      );
+      portrait.setDepth(UI_DEPTH + 1);
+      this.selectionGraphics.push(portrait);
+
+      // Unit type initial in portrait
+      const initial = this.add.text(
+        portraitX + PORTRAIT_SIZE / 2,
+        portraitY + PORTRAIT_SIZE / 2 - 4,
+        stats.isVehicle ? 'V' : stats.name.charAt(0),
+        { fontSize: '28px', fontFamily: FONT_FAMILY, color: '#FFFFFF', fontStyle: 'bold' },
+      );
+      initial.setOrigin(0.5, 0.5);
+      initial.setDepth(UI_DEPTH + 2);
+      this.selectionTexts.push(initial);
+
+      // Members count below initial
+      const memLabel = this.add.text(
+        portraitX + PORTRAIT_SIZE / 2,
+        portraitY + PORTRAIT_SIZE / 2 + 18,
+        `${squad.members}/${stats.squadSize}`,
+        { fontSize: '11px', fontFamily: FONT_FAMILY, color: '#CCCCCC' },
+      );
+      memLabel.setOrigin(0.5, 0.5);
+      memLabel.setDepth(UI_DEPTH + 2);
+      this.selectionTexts.push(memLabel);
+
+      // ── Info section (right of portrait) ──────────────────────────────
+      const infoX = portraitX + PORTRAIT_SIZE + 14;
+      const infoW = panelW - PORTRAIT_SIZE - 24;
+
+      // Unit name
+      const nameText = this.add.text(infoX, panelY + 5, stats.name, {
+        fontSize: '16px', fontFamily: FONT_FAMILY, color: '#FFFFFF', fontStyle: 'bold',
       });
       nameText.setDepth(UI_DEPTH + 1);
       this.selectionTexts.push(nameText);
 
-      // Tier
-      const tierText = this.add.text(panelX + 10, panelY + 30, `Tier ${stats.tier}  |  ${squad.state.toUpperCase()}`, {
-        fontSize: '12px',
-        fontFamily: FONT_FAMILY,
-        color: '#AAAAAA',
+      // State + Tier badge
+      const stateColor = squad.state === 'idle' ? '#88FF88' : squad.state === 'attacking' ? '#FF6666' : '#FFCC44';
+      const stateText = this.add.text(infoX, panelY + 24, `T${stats.tier}  ${squad.state.toUpperCase()}`, {
+        fontSize: '11px', fontFamily: FONT_FAMILY, color: stateColor,
       });
-      tierText.setDepth(UI_DEPTH + 1);
-      this.selectionTexts.push(tierText);
-
-      // HP bar
-      this.drawSelectionHpBar(panelX + 10, panelY + 50, SELECTION_PANEL_WIDTH - 20, 8, squad.hp, squad.maxHp);
-
-      // HP text
-      const hpText = this.add.text(panelX + 10, panelY + 62, `HP: ${Math.ceil(squad.hp)}/${squad.maxHp}`, {
-        fontSize: '12px',
-        fontFamily: FONT_FAMILY,
-        color: '#CCCCCC',
-      });
-      hpText.setDepth(UI_DEPTH + 1);
-      this.selectionTexts.push(hpText);
-
-      // Members
-      const memberText = this.add.text(panelX + 150, panelY + 62, `Members: ${squad.members}/${stats.squadSize}`, {
-        fontSize: '12px',
-        fontFamily: FONT_FAMILY,
-        color: '#CCCCCC',
-      });
-      memberText.setDepth(UI_DEPTH + 1);
-      this.selectionTexts.push(memberText);
+      stateText.setDepth(UI_DEPTH + 1);
+      this.selectionTexts.push(stateText);
 
       // Veterancy stars
       const stars = '\u2605'.repeat(squad.veterancy) + '\u2606'.repeat(3 - squad.veterancy);
-      const vetText = this.add.text(panelX + 10, panelY + 82, `Veterancy: ${stars}`, {
-        fontSize: '12px',
-        fontFamily: FONT_FAMILY,
-        color: '#FFD700',
+      const vetText = this.add.text(infoX + 100, panelY + 24, stars, {
+        fontSize: '12px', fontFamily: FONT_FAMILY, color: '#FFD700',
       });
       vetText.setDepth(UI_DEPTH + 1);
       this.selectionTexts.push(vetText);
 
+      // HP bar
+      this.drawSelectionHpBar(infoX, panelY + 42, infoW, 10, squad.hp, squad.maxHp);
+
+      const hpLabel = this.add.text(infoX, panelY + 55, `${Math.ceil(squad.hp)} / ${squad.maxHp}`, {
+        fontSize: '10px', fontFamily: FONT_FAMILY, color: '#AAAAAA',
+      });
+      hpLabel.setDepth(UI_DEPTH + 1);
+      this.selectionTexts.push(hpLabel);
+
+      // ── Stat grid (AoE2-style rows) ───────────────────────────────────
+      const statY = panelY + 72;
+      const totalDps = squad.members * stats.dpsPerMember;
+      const vetMult = 1 + squad.veterancy * 0.1;
+
+      const statRows = [
+        { icon: '\u2694', label: 'Attack', value: `${(totalDps * vetMult).toFixed(1)} DPS`, color: '#FF8888' },
+        { icon: '\u25CE', label: 'Range', value: `${stats.range} tiles`, color: '#88AAFF' },
+        { icon: '\u2192', label: 'Speed', value: `${stats.speed} t/s`, color: '#88FF88' },
+        { icon: '\u25C9', label: 'Sight', value: `${stats.sightRange} tiles`, color: '#FFCC44' },
+      ];
+
+      for (let i = 0; i < statRows.length; i++) {
+        const row = statRows[i];
+        const col = i % 2;
+        const rowIdx = Math.floor(i / 2);
+        const sx = infoX + col * (infoW / 2);
+        const sy = statY + rowIdx * 18;
+
+        const iconText = this.add.text(sx, sy, `${row.icon} ${row.label}: `, {
+          fontSize: '11px', fontFamily: FONT_FAMILY, color: '#888888',
+        });
+        iconText.setDepth(UI_DEPTH + 1);
+        this.selectionTexts.push(iconText);
+
+        const valText = this.add.text(sx + 75, sy, row.value, {
+          fontSize: '11px', fontFamily: FONT_FAMILY, color: row.color, fontStyle: 'bold',
+        });
+        valText.setDepth(UI_DEPTH + 1);
+        this.selectionTexts.push(valText);
+      }
+
       // Carrying goods (if applicable)
       if (stats.canCarryGoods) {
-        const goodsText = this.add.text(panelX + 10, panelY + 102, `Carrying: ${squad.carryingGoods}/${stats.goodsCapacity} goods`, {
-          fontSize: '12px',
-          fontFamily: FONT_FAMILY,
-          color: '#CD853F',
+        const goodsText = this.add.text(infoX, statY + 40, `Cargo: ${squad.carryingGoods}/${stats.goodsCapacity} goods`, {
+          fontSize: '11px', fontFamily: FONT_FAMILY, color: '#CD853F',
         });
         goodsText.setDepth(UI_DEPTH + 1);
         this.selectionTexts.push(goodsText);
       }
 
-      // DPS info
-      const dpsText = this.add.text(panelX + 10, panelY + 122, `DPS: ${squad.members * stats.dpsPerMember}  |  Range: ${stats.range}  |  Speed: ${stats.speed}`, {
-        fontSize: '11px',
-        fontFamily: FONT_FAMILY,
-        color: '#888888',
+      // Description
+      const descText = this.add.text(infoX, panelY + BOTTOM_BAR_HEIGHT - 35, stats.description, {
+        fontSize: '10px', fontFamily: FONT_FAMILY, color: '#666666', fontStyle: 'italic',
+        wordWrap: { width: infoW },
       });
-      dpsText.setDepth(UI_DEPTH + 1);
-      this.selectionTexts.push(dpsText);
+      descText.setDepth(UI_DEPTH + 1);
+      this.selectionTexts.push(descText);
 
     } else if (selected.length > 1) {
-      // ── Multiple units selected ───────────────────────────────────────
+      // ══════════════════════════════════════════════════════════════════
+      // MULTI-SELECT — AoE2-style unit icon grid
+      // ══════════════════════════════════════════════════════════════════
       this.selectionType = 'multi';
       this.multiSelection = selected;
-      this.selectionPanelBg.setVisible(true);
 
-      // Count and types summary
-      const typeCount = new Map<string, number>();
-      let totalHp = 0;
-      let totalMaxHp = 0;
-
-      for (const squad of selected) {
-        const name = squad.stats.name;
-        typeCount.set(name, (typeCount.get(name) ?? 0) + 1);
-        totalHp += squad.hp;
-        totalMaxHp += squad.maxHp;
-      }
-
-      const countText = this.add.text(panelX + 10, panelY + 10, `${selected.length} Squads Selected`, {
-        fontSize: '16px',
-        fontFamily: FONT_FAMILY,
-        color: '#FFFFFF',
-        fontStyle: 'bold',
+      // Header
+      const countText = this.add.text(panelX + 5, panelY + 2, `${selected.length} Units Selected`, {
+        fontSize: '13px', fontFamily: FONT_FAMILY, color: '#FFFFFF', fontStyle: 'bold',
       });
       countText.setDepth(UI_DEPTH + 1);
       this.selectionTexts.push(countText);
 
-      // Type breakdown
-      let yOffset = panelY + 35;
-      for (const [name, count] of typeCount) {
-        const typeText = this.add.text(panelX + 10, yOffset, `${name} x${count}`, {
-          fontSize: '12px',
-          fontFamily: FONT_FAMILY,
-          color: '#CCCCCC',
-        });
-        typeText.setDepth(UI_DEPTH + 1);
-        this.selectionTexts.push(typeText);
-        yOffset += 16;
+      // Type summary text (compact)
+      const typeCount = new Map<string, number>();
+      for (const squad of selected) {
+        const name = squad.stats.name;
+        typeCount.set(name, (typeCount.get(name) ?? 0) + 1);
+      }
+      const summary = Array.from(typeCount.entries()).map(([n, c]) => `${n} x${c}`).join('  |  ');
+      const summaryText = this.add.text(panelX + 5, panelY + 18, summary, {
+        fontSize: '10px', fontFamily: FONT_FAMILY, color: '#999999',
+      });
+      summaryText.setDepth(UI_DEPTH + 1);
+      this.selectionTexts.push(summaryText);
+
+      // ── Unit icon grid ────────────────────────────────────────────────
+      const gridStartX = panelX + 5;
+      const gridStartY = panelY + 34;
+      const maxVisible = GRID_COLS * GRID_ROWS;
+
+      for (let i = 0; i < Math.min(selected.length, maxVisible); i++) {
+        const squad = selected[i];
+        const col = i % GRID_COLS;
+        const row = Math.floor(i / GRID_COLS);
+        const iconX = gridStartX + col * (GRID_ICON_SIZE + GRID_ICON_GAP);
+        const iconY = gridStartY + row * (GRID_ICON_SIZE + GRID_ICON_GAP + 2);
+
+        this.createUnitGridIcon(iconX, iconY, squad, unitSystem);
       }
 
-      // Combined HP bar
-      this.drawSelectionHpBar(panelX + 10, panelY + SELECTION_PANEL_HEIGHT - 40, SELECTION_PANEL_WIDTH - 20, 8, totalHp, totalMaxHp);
-
-      const hpText = this.add.text(panelX + 10, panelY + SELECTION_PANEL_HEIGHT - 28, `Total HP: ${Math.ceil(totalHp)}/${totalMaxHp}`, {
-        fontSize: '12px',
-        fontFamily: FONT_FAMILY,
-        color: '#CCCCCC',
-      });
-      hpText.setDepth(UI_DEPTH + 1);
-      this.selectionTexts.push(hpText);
+      // Overflow indicator
+      if (selected.length > maxVisible) {
+        const moreText = this.add.text(
+          gridStartX + GRID_COLS * (GRID_ICON_SIZE + GRID_ICON_GAP) + 5,
+          gridStartY,
+          `+${selected.length - maxVisible}`,
+          { fontSize: '12px', fontFamily: FONT_FAMILY, color: '#FFCC44', fontStyle: 'bold' },
+        );
+        moreText.setDepth(UI_DEPTH + 1);
+        this.selectionTexts.push(moreText);
+      }
 
     } else if (selectedBuilding) {
-      // ── Building selected ─────────────────────────────────────────────
+      // ══════════════════════════════════════════════════════════════════
+      // BUILDING SELECTED — Enhanced view
+      // ══════════════════════════════════════════════════════════════════
       this.selectionType = 'building';
       this.currentSelection = selectedBuilding;
-      this.selectionPanelBg.setVisible(true);
 
       const building = selectedBuilding;
       const stats = building.stats;
 
-      // Building name
-      const nameText = this.add.text(panelX + 10, panelY + 10, stats.name, {
-        fontSize: '16px',
-        fontFamily: FONT_FAMILY,
-        color: '#FFFFFF',
-        fontStyle: 'bold',
+      // Portrait box
+      const portraitX = panelX + 5;
+      const portraitY = panelY + 5;
+      const ownerColor = building.owner === -1 ? 0x888888 :
+        building.owner === 0 ? 0xCC0000 : 0x0044CC;
+
+      const portraitBorder = this.add.rectangle(
+        portraitX + PORTRAIT_SIZE / 2, portraitY + PORTRAIT_SIZE / 2,
+        PORTRAIT_SIZE + 4, PORTRAIT_SIZE + 4,
+        0x222222, 0.9,
+      );
+      portraitBorder.setStrokeStyle(2, ownerColor, 0.9);
+      portraitBorder.setDepth(UI_DEPTH + 1);
+      this.selectionGraphics.push(portraitBorder);
+
+      const portrait = this.add.rectangle(
+        portraitX + PORTRAIT_SIZE / 2, portraitY + PORTRAIT_SIZE / 2,
+        PORTRAIT_SIZE, PORTRAIT_SIZE,
+        0x2a1f14, 0.8,
+      );
+      portrait.setDepth(UI_DEPTH + 1);
+      this.selectionGraphics.push(portrait);
+
+      const bldgIcon = this.add.text(
+        portraitX + PORTRAIT_SIZE / 2, portraitY + PORTRAIT_SIZE / 2,
+        'B', { fontSize: '28px', fontFamily: FONT_FAMILY, color: '#FFFFFF', fontStyle: 'bold' },
+      );
+      bldgIcon.setOrigin(0.5, 0.5);
+      bldgIcon.setDepth(UI_DEPTH + 2);
+      this.selectionTexts.push(bldgIcon);
+
+      // Info section
+      const infoX = portraitX + PORTRAIT_SIZE + 14;
+      const infoW = panelW - PORTRAIT_SIZE - 24;
+
+      const nameText = this.add.text(infoX, panelY + 5, stats.name, {
+        fontSize: '16px', fontFamily: FONT_FAMILY, color: '#FFFFFF', fontStyle: 'bold',
       });
       nameText.setDepth(UI_DEPTH + 1);
       this.selectionTexts.push(nameText);
 
-      // Owner and tier
       const ownerName = building.owner === -1 ? 'Neutral' : building.owner === 0 ? 'Player' : 'Enemy';
-      const infoText = this.add.text(panelX + 10, panelY + 30, `Tier ${stats.tier}  |  Owner: ${ownerName}`, {
-        fontSize: '12px',
-        fontFamily: FONT_FAMILY,
-        color: '#AAAAAA',
+      const infoText = this.add.text(infoX, panelY + 24, `T${stats.tier}  |  ${ownerName}`, {
+        fontSize: '11px', fontFamily: FONT_FAMILY, color: '#AAAAAA',
       });
       infoText.setDepth(UI_DEPTH + 1);
       this.selectionTexts.push(infoText);
 
       // HP bar
-      this.drawSelectionHpBar(panelX + 10, panelY + 50, SELECTION_PANEL_WIDTH - 20, 8, building.hp, building.maxHp);
+      this.drawSelectionHpBar(infoX, panelY + 42, infoW, 10, building.hp, building.maxHp);
 
-      const hpText = this.add.text(panelX + 10, panelY + 62, `HP: ${Math.ceil(building.hp)}/${building.maxHp}`, {
-        fontSize: '12px',
-        fontFamily: FONT_FAMILY,
-        color: '#CCCCCC',
+      const hpLabel = this.add.text(infoX, panelY + 55, `${Math.ceil(building.hp)} / ${building.maxHp}`, {
+        fontSize: '10px', fontFamily: FONT_FAMILY, color: '#AAAAAA',
       });
-      hpText.setDepth(UI_DEPTH + 1);
-      this.selectionTexts.push(hpText);
+      hpLabel.setDepth(UI_DEPTH + 1);
+      this.selectionTexts.push(hpLabel);
 
-      // Income rates
-      const incomeText = this.add.text(panelX + 10, panelY + 82,
-        `Income: $${stats.cashPerMin}/min  |  Goods: ${stats.goodsPerMin}/min  |  Inf: ${stats.influencePerMin}/min`, {
-          fontSize: '12px',
-          fontFamily: FONT_FAMILY,
-          color: '#CCCCCC',
+      // Stat rows
+      const statY = panelY + 72;
+      const buildingStats = [
+        { label: 'Cash', value: `$${stats.cashPerMin}/min`, color: '#FFD700' },
+        { label: 'Goods', value: `${stats.goodsPerMin}/min`, color: '#CD853F' },
+        { label: 'Influence', value: `${stats.influencePerMin}/min`, color: '#6495ED' },
+      ];
+
+      for (let i = 0; i < buildingStats.length; i++) {
+        const s = buildingStats[i];
+        const sx = infoX + i * (infoW / 3);
+        const statLabel = this.add.text(sx, statY, `${s.label}: ${s.value}`, {
+          fontSize: '11px', fontFamily: FONT_FAMILY, color: s.color,
         });
-      incomeText.setDepth(UI_DEPTH + 1);
-      this.selectionTexts.push(incomeText);
+        statLabel.setDepth(UI_DEPTH + 1);
+        this.selectionTexts.push(statLabel);
+      }
 
-      // Goods stored (if applicable)
+      // Goods stored
       if (stats.canStoreGoods) {
-        const goodsText = this.add.text(panelX + 10, panelY + 100, `Goods Stored: ${building.goodsStored}/${stats.goodsStorage}`, {
-          fontSize: '12px',
-          fontFamily: FONT_FAMILY,
-          color: '#CD853F',
+        const goodsText = this.add.text(infoX, statY + 18, `Storage: ${building.goodsStored}/${stats.goodsStorage} goods`, {
+          fontSize: '11px', fontFamily: FONT_FAMILY, color: '#CD853F',
         });
         goodsText.setDepth(UI_DEPTH + 1);
         this.selectionTexts.push(goodsText);
@@ -705,10 +880,9 @@ export class UIScene extends Phaser.Scene {
 
       // Garrison status
       if (stats.canGarrison) {
-        const garrisonText = this.add.text(panelX + 10, panelY + 118, `Garrison: ${building.garrisonedSquads.length}/${stats.garrisonSlots}`, {
-          fontSize: '12px',
-          fontFamily: FONT_FAMILY,
-          color: '#CCCCCC',
+        const garrisonText = this.add.text(infoX, statY + (stats.canStoreGoods ? 36 : 18),
+          `Garrison: ${building.garrisonedSquads.length}/${stats.garrisonSlots}`, {
+          fontSize: '11px', fontFamily: FONT_FAMILY, color: '#88AAFF',
         });
         garrisonText.setDepth(UI_DEPTH + 1);
         this.selectionTexts.push(garrisonText);
@@ -716,21 +890,104 @@ export class UIScene extends Phaser.Scene {
 
       // Capture progress
       if (building.isBeingCaptured) {
-        const captureText = this.add.text(panelX + 10, panelY + 134, `Capture: ${Math.floor(building.captureProgress * 100)}%`, {
-          fontSize: '12px',
-          fontFamily: FONT_FAMILY,
-          color: '#FFD700',
+        const captureText = this.add.text(infoX, panelY + BOTTOM_BAR_HEIGHT - 35,
+          `CAPTURING: ${Math.floor(building.captureProgress * 100)}%`, {
+          fontSize: '12px', fontFamily: FONT_FAMILY, color: '#FFD700', fontStyle: 'bold',
         });
         captureText.setDepth(UI_DEPTH + 1);
         this.selectionTexts.push(captureText);
       }
 
     } else {
-      // ── Nothing selected ──────────────────────────────────────────────
+      // ══════════════════════════════════════════════════════════════════
+      // NOTHING SELECTED
+      // ══════════════════════════════════════════════════════════════════
       this.selectionType = 'none';
       this.currentSelection = null;
-      this.selectionPanelBg.setVisible(false);
     }
+  }
+
+  // ── Unit grid icon (AoE2-style clickable unit box in multi-select) ──
+
+  private createUnitGridIcon(x: number, y: number, squad: any, unitSystem: any): void {
+    // Icon background
+    const bg = this.add.rectangle(
+      x + GRID_ICON_SIZE / 2,
+      y + GRID_ICON_SIZE / 2,
+      GRID_ICON_SIZE, GRID_ICON_SIZE,
+      squad.stats.color, 0.5,
+    );
+    bg.setDepth(UI_DEPTH + 1);
+
+    // Border (gold for healthy, red for low HP)
+    const hpRatio = squad.hp / squad.maxHp;
+    const borderColor = hpRatio > 0.5 ? 0x8B7355 : hpRatio > 0.25 ? 0xCCCC00 : 0xCC0000;
+    const border = this.add.rectangle(
+      x + GRID_ICON_SIZE / 2,
+      y + GRID_ICON_SIZE / 2,
+      GRID_ICON_SIZE + 2, GRID_ICON_SIZE + 2,
+      0, 0,
+    );
+    border.setStrokeStyle(1, borderColor, 0.8);
+    border.setDepth(UI_DEPTH + 2);
+
+    // Unit type letter
+    const letter = this.add.text(
+      x + GRID_ICON_SIZE / 2,
+      y + GRID_ICON_SIZE / 2 - 3,
+      squad.stats.isVehicle ? 'V' : squad.stats.name.charAt(0),
+      { fontSize: '14px', fontFamily: FONT_FAMILY, color: '#FFFFFF', fontStyle: 'bold' },
+    );
+    letter.setOrigin(0.5, 0.5);
+    letter.setDepth(UI_DEPTH + 2);
+    this.selectionTexts.push(letter);
+
+    // Members count
+    const memText = this.add.text(
+      x + GRID_ICON_SIZE / 2,
+      y + GRID_ICON_SIZE / 2 + 10,
+      `${squad.members}`,
+      { fontSize: '9px', fontFamily: FONT_FAMILY, color: '#CCCCCC' },
+    );
+    memText.setOrigin(0.5, 0.5);
+    memText.setDepth(UI_DEPTH + 2);
+    this.selectionTexts.push(memText);
+
+    // Tiny HP bar below icon
+    const hpBar = this.add.graphics();
+    hpBar.setDepth(UI_DEPTH + 2);
+    const hpBarY = y + GRID_ICON_SIZE + 1;
+    hpBar.fillStyle(0x333333, 0.9);
+    hpBar.fillRect(x, hpBarY, GRID_ICON_SIZE, 3);
+    const hpColor = hpRatio > 0.6 ? 0x00CC00 : hpRatio > 0.3 ? 0xCCCC00 : 0xCC0000;
+    hpBar.fillStyle(hpColor, 1);
+    hpBar.fillRect(x, hpBarY, GRID_ICON_SIZE * hpRatio, 3);
+
+    // Make interactive: click to select just this unit
+    bg.setInteractive({ useHandCursor: true });
+    bg.on('pointerover', () => {
+      border.setStrokeStyle(2, 0x00FF00, 1);
+    });
+    bg.on('pointerout', () => {
+      border.setStrokeStyle(1, borderColor, 0.8);
+    });
+    bg.on('pointerdown', () => {
+      if (unitSystem) {
+        unitSystem.deselectAll();
+        unitSystem.selectSquad(squad);
+      }
+    });
+
+    this.unitGridIcons.push({ bg, hpBar, border, squad });
+  }
+
+  private clearUnitGrid(): void {
+    for (const icon of this.unitGridIcons) {
+      icon.bg.destroy();
+      icon.hpBar.destroy();
+      icon.border.destroy();
+    }
+    this.unitGridIcons = [];
   }
 
   private drawSelectionHpBar(x: number, y: number, width: number, height: number, hp: number, maxHp: number): void {
@@ -765,29 +1022,168 @@ export class UIScene extends Phaser.Scene {
   // ═══════════════════════════════════════════════════════════════════════
 
   private createActionBar(): void {
-    const barX = VIEWPORT_WIDTH - ACTION_BAR_WIDTH - 10;
-    const barY = VIEWPORT_HEIGHT - ACTION_BAR_HEIGHT - 10;
-
-    // Background
-    this.actionBarBg = this.add.rectangle(
-      barX + ACTION_BAR_WIDTH / 2,
-      barY + ACTION_BAR_HEIGHT / 2,
-      ACTION_BAR_WIDTH,
-      ACTION_BAR_HEIGHT,
-      PANEL_BG_COLOR,
-      PANEL_BG_ALPHA,
-    );
-    this.actionBarBg.setStrokeStyle(1, PANEL_BORDER_COLOR, 0.8);
-    this.actionBarBg.setDepth(UI_DEPTH);
+    // Action bar sits in the right section of the unified bottom bar
+    // No separate background needed — bottom bar provides it
+    this.actionBarBg = this.add.rectangle(0, 0, 1, 1, 0, 0);
     this.actionBarBg.setVisible(false);
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // GAME TIMER & SPEED DISPLAY (Feature 3 & 5)
+  // ═══════════════════════════════════════════════════════════════════════
+
+  private createTimerDisplay(): void {
+    const textY = RESOURCE_BAR_HEIGHT / 2;
+
+    // Game timer -- top-center-right area (between income rates and tier display)
+    this.timerText = this.add.text(VIEWPORT_WIDTH / 2 + 180, textY, '00:00', {
+      fontSize: '14px',
+      fontFamily: FONT_FAMILY,
+      color: '#FFFFFF',
+      fontStyle: 'bold',
+    });
+    this.timerText.setOrigin(0.5, 0.5);
+    this.timerText.setDepth(UI_DEPTH + 1);
+
+    // Game speed display -- right of timer
+    this.gameSpeedText = this.add.text(VIEWPORT_WIDTH / 2 + 240, textY, '1.0x', {
+      fontSize: '13px',
+      fontFamily: FONT_FAMILY,
+      color: '#88FF88',
+    });
+    this.gameSpeedText.setOrigin(0.5, 0.5);
+    this.gameSpeedText.setDepth(UI_DEPTH + 1);
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // PAUSE OVERLAY (Feature 4)
+  // ═══════════════════════════════════════════════════════════════════════
+
+  private createPauseOverlay(): void {
+    this.pauseOverlay = this.add.text(VIEWPORT_WIDTH / 2, VIEWPORT_HEIGHT / 2, 'PAUSED', {
+      fontSize: '48px',
+      fontFamily: FONT_FAMILY,
+      color: '#FFFFFF',
+      fontStyle: 'bold',
+      stroke: '#000000',
+      strokeThickness: 4,
+    });
+    this.pauseOverlay.setOrigin(0.5, 0.5);
+    this.pauseOverlay.setDepth(UI_DEPTH + 20);
+    this.pauseOverlay.setVisible(false);
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // PRODUCTION QUEUE UI (Feature 1)
+  // ═══════════════════════════════════════════════════════════════════════
+
+  private createProductionQueueUI(): void {
+    this.productionProgressBar = this.add.graphics();
+    this.productionProgressBar.setDepth(UI_DEPTH + 1);
+    this.productionProgressBar.setVisible(false);
+  }
+
+  private updateProductionQueueUI(): void {
+    // Clear previous queue text elements
+    for (const text of this.productionQueueTexts) {
+      text.destroy();
+    }
+    this.productionQueueTexts = [];
+    this.productionProgressBar.clear();
+    this.productionProgressBar.setVisible(false);
+
+    const gameScene = this.gameScene as any;
+    const selectedBuilding = gameScene?.selectedBuilding;
+
+    if (!selectedBuilding || !selectedBuilding.stats.canProduceUnits || selectedBuilding.owner !== 0) {
+      return;
+    }
+
+    const queue = selectedBuilding.getQueue();
+    if (!queue || queue.length === 0) return;
+
+    const barX = COMMAND_PANEL_X;
+    const barY = BOTTOM_BAR_Y + 8;
+
+    // Draw production queue below the production buttons
+    const queueStartX = barX + 5;
+    const queueStartY = barY + 130;
+
+    // "Queue:" label
+    const queueLabel = this.add.text(queueStartX, queueStartY, 'Queue:', {
+      fontSize: '12px',
+      fontFamily: FONT_FAMILY,
+      color: '#AAAAAA',
+      fontStyle: 'bold',
+    });
+    queueLabel.setDepth(UI_DEPTH + 2);
+    this.productionQueueTexts.push(queueLabel);
+
+    for (let i = 0; i < queue.length; i++) {
+      const entry = queue[i];
+      const unitDef = UNIT_DEFS[entry.unitType as keyof typeof UNIT_DEFS];
+      const name = unitDef ? unitDef.name : entry.unitType;
+      const yPos = queueStartY + 18 + i * 20;
+
+      if (i === 0) {
+        // Currently producing -- show progress
+        const progress = Math.min(1, entry.progress / entry.totalTime);
+        const progressPct = Math.floor(progress * 100);
+
+        const text = this.add.text(queueStartX, yPos, `> ${name} (${progressPct}%)`, {
+          fontSize: '11px',
+          fontFamily: FONT_FAMILY,
+          color: '#00FF00',
+        });
+        text.setDepth(UI_DEPTH + 2);
+        this.productionQueueTexts.push(text);
+
+        // Draw progress bar
+        const pbX = queueStartX;
+        const pbY = yPos + 14;
+        const pbW = COMMAND_PANEL_WIDTH - 20;
+        const pbH = 4;
+
+        this.productionProgressBar.setVisible(true);
+        this.productionProgressBar.fillStyle(0x333333, 0.9);
+        this.productionProgressBar.fillRect(pbX, pbY, pbW, pbH);
+        this.productionProgressBar.fillStyle(0x00CC00, 1);
+        this.productionProgressBar.fillRect(pbX, pbY, pbW * progress, pbH);
+      } else {
+        // Queued -- show with cancel hint
+        const text = this.add.text(queueStartX, yPos, `  ${i + 1}. ${name}`, {
+          fontSize: '11px',
+          fontFamily: FONT_FAMILY,
+          color: '#CCCCCC',
+        });
+        text.setDepth(UI_DEPTH + 2);
+        this.productionQueueTexts.push(text);
+      }
+    }
+
+    // Rally point indicator
+    if (selectedBuilding.rallyPoint) {
+      const rpText = this.add.text(
+        queueStartX,
+        queueStartY + 18 + queue.length * 20 + 4,
+        `Rally: (${selectedBuilding.rallyPoint.x}, ${selectedBuilding.rallyPoint.y})`,
+        {
+          fontSize: '10px',
+          fontFamily: FONT_FAMILY,
+          color: '#88AAFF',
+        },
+      );
+      rpText.setDepth(UI_DEPTH + 2);
+      this.productionQueueTexts.push(rpText);
+    }
   }
 
   private updateActionBar(): void {
     // Clear existing buttons
     this.clearActionButtons();
 
-    const barX = VIEWPORT_WIDTH - ACTION_BAR_WIDTH - 10;
-    const barY = VIEWPORT_HEIGHT - ACTION_BAR_HEIGHT - 10;
+    const barX = COMMAND_PANEL_X;
+    const barY = BOTTOM_BAR_Y + 8;
 
     const gameScene = this.gameScene as any;
     const unitSystem = gameScene?.unitSystem;
@@ -795,110 +1191,162 @@ export class UIScene extends Phaser.Scene {
     const selectedBuilding = gameScene?.selectedBuilding;
 
     if (selectedBuilding && selectedBuilding.stats.canProduceUnits && selectedBuilding.owner === 0) {
-      // ── Compound selected: Show unit production buttons ───────────────
-      this.actionBarBg.setVisible(true);
+      // ── Compound selected: Show unit production buttons (AoE2 grid) ──
+
+      // Section label
+      const label = this.add.text(barX + 5, barY - 2, 'PRODUCE', {
+        fontSize: '10px', fontFamily: FONT_FAMILY, color: '#8B7355', fontStyle: 'bold',
+      });
+      label.setDepth(UI_DEPTH + 2);
+      this.actionButtons.push({ background: label as any, label: label, callback: () => {}, enabled: true });
 
       const produceableUnits = [
-        { type: UnitType.RUNNER, hotkey: '1' },
-        { type: UnitType.THUG, hotkey: '2' },
-        { type: UnitType.ENFORCER, hotkey: '3' },
-        { type: UnitType.ARSONIST, hotkey: '4' },
-        { type: UnitType.LOOKOUT, hotkey: '5' },
+        { type: UnitType.RUNNER, hotkey: 'C-Q' },
+        { type: UnitType.THUG, hotkey: '' },
+        { type: UnitType.ENFORCER, hotkey: 'C-E' },
+        { type: UnitType.ARSONIST, hotkey: '' },
+        { type: UnitType.LOOKOUT, hotkey: '' },
       ];
 
-      let idx = 0;
-      const btnW = 130;
-      const btnH = 24;
+      // AoE2-style grid: 3 columns × 2 rows of square buttons
+      const btnSize = 52;
       const gap = 4;
+      const gridX = barX + 5;
+      const gridY = barY + 14;
 
-      for (const unit of produceableUnits) {
+      for (let i = 0; i < produceableUnits.length; i++) {
+        const unit = produceableUnits[i];
         const def = UNIT_DEFS[unit.type];
-        const bx = barX + 10;
-        const by = barY + 10 + idx * (btnH + gap);
+        const col = i % 3;
+        const row = Math.floor(i / 3);
+        const bx = gridX + col * (btnSize + gap) + btnSize / 2;
+        const by = gridY + row * (btnSize + gap) + btnSize / 2;
         const canAfford = this.playerCash >= def.cost;
         const tierOk = def.tier <= this.currentTier;
         const enabled = canAfford && tierOk;
 
-        this.createActionButton(
-          bx + btnW / 2,
-          by + btnH / 2,
-          btnW,
-          btnH,
-          `[${unit.hotkey}] ${def.name} $${def.cost}`,
-          enabled,
-          () => {
-            EventBus.emit(GameEvents.PRODUCE_UNIT, unit.type, 0);
-          },
-        );
+        // Square button with unit color
+        const bg = this.add.rectangle(bx, by, btnSize, btnSize, enabled ? 0x1a1a1a : 0x0d0d0d, 0.9);
+        bg.setDepth(UI_DEPTH + 1);
+        bg.setStrokeStyle(1, enabled ? 0x8B7355 : 0x333333, 0.8);
 
-        idx++;
+        // Unit color swatch
+        const swatch = this.add.rectangle(bx, by - 8, btnSize - 12, 18, def.color, enabled ? 0.6 : 0.2);
+        swatch.setDepth(UI_DEPTH + 2);
+        this.selectionGraphics.push(swatch);
+
+        // Unit name (abbreviated)
+        const shortName = def.name.split(' ')[0].substring(0, 6);
+        const nameLabel = this.add.text(bx, by + 8, shortName, {
+          fontSize: '9px', fontFamily: FONT_FAMILY, color: enabled ? '#CCCCCC' : '#555555',
+        });
+        nameLabel.setOrigin(0.5, 0.5);
+        nameLabel.setDepth(UI_DEPTH + 2);
+
+        // Cost
+        const costLabel = this.add.text(bx, by + 20, `$${def.cost}`, {
+          fontSize: '9px', fontFamily: FONT_FAMILY, color: enabled ? '#FFD700' : '#444444',
+        });
+        costLabel.setOrigin(0.5, 0.5);
+        costLabel.setDepth(UI_DEPTH + 2);
+
+        if (enabled) {
+          bg.setInteractive({ useHandCursor: true });
+          bg.on('pointerover', () => bg.setStrokeStyle(2, 0x00FF00, 1));
+          bg.on('pointerout', () => bg.setStrokeStyle(1, 0x8B7355, 0.8));
+          bg.on('pointerdown', () => {
+            const gs = this.gameScene as any;
+            if (typeof gs?.handleProduceUnit === 'function') {
+              gs.handleProduceUnit(unit.type);
+            }
+          });
+        }
+
+        this.actionButtons.push({ background: bg, label: nameLabel, callback: () => {}, enabled });
+        // Track extra text for cleanup
+        this.actionButtons.push({ background: costLabel as any, label: costLabel, callback: () => {}, enabled });
       }
+
+      // Hotkey hints
+      const hotkeyHint = this.add.text(barX + 5, gridY + 2 * (btnSize + gap) + 10,
+        'Ctrl+Q: Runner  Ctrl+E: Enforcer', {
+        fontSize: '9px', fontFamily: FONT_FAMILY, color: '#555555',
+      });
+      hotkeyHint.setDepth(UI_DEPTH + 1);
+      this.actionButtons.push({ background: hotkeyHint as any, label: hotkeyHint, callback: () => {}, enabled: true });
 
     } else if (selected.length > 0) {
-      // ── Units selected: Show command buttons ──────────────────────────
-      this.actionBarBg.setVisible(true);
+      // ── Units selected: Show command buttons (AoE2-style grid) ────────
 
-      const btnW = 130;
-      const btnH = 28;
-      const gap = 6;
-      let idx = 0;
+      const label = this.add.text(barX + 5, barY - 2, 'COMMANDS', {
+        fontSize: '10px', fontFamily: FONT_FAMILY, color: '#8B7355', fontStyle: 'bold',
+      });
+      label.setDepth(UI_DEPTH + 2);
+      this.actionButtons.push({ background: label as any, label: label, callback: () => {}, enabled: true });
 
-      // Stop button
-      this.createActionButton(
-        barX + 10 + btnW / 2,
-        barY + 10 + idx * (btnH + gap) + btnH / 2,
-        btnW,
-        btnH,
-        '[S] Stop',
-        true,
-        () => gameScene?.handleStopSelected?.(),
-      );
-      idx++;
+      const btnSize = 52;
+      const gap = 4;
+      const gridX = barX + 5;
+      const gridY = barY + 14;
 
-      // Retreat button
-      this.createActionButton(
-        barX + 10 + btnW / 2,
-        barY + 10 + idx * (btnH + gap) + btnH / 2,
-        btnW,
-        btnH,
-        '[R] Retreat',
-        true,
-        () => gameScene?.handleRetreat?.(),
-      );
-      idx++;
+      const commands = [
+        { icon: '\u25A0', name: 'Stop', key: 'X', color: 0xCC4444, cb: () => gameScene?.handleStopSelected?.() },
+        { icon: '\u2190', name: 'Retreat', key: 'R', color: 0xCCAA44, cb: () => gameScene?.handleRetreat?.() },
+        { icon: '\u25B2', name: 'Garrison', key: 'G', color: 0x4488CC, cb: () => gameScene?.handleGarrison?.() },
+      ];
 
-      // Garrison button
-      this.createActionButton(
-        barX + 10 + btnW / 2,
-        barY + 10 + idx * (btnH + gap) + btnH / 2,
-        btnW,
-        btnH,
-        '[G] Garrison',
-        true,
-        () => gameScene?.handleGarrison?.(),
-      );
-      idx++;
-
-      // Check for goods carriers -- show Set Route button
+      // Add route button if any carrier selected
       const hasCarrier = selected.some((s: any) => s.stats.canCarryGoods);
       if (hasCarrier) {
-        this.createActionButton(
-          barX + 10 + btnW / 2,
-          barY + 10 + idx * (btnH + gap) + btnH / 2,
-          btnW,
-          btnH,
-          'Set Route',
-          true,
-          () => {
-            // Route setting would be handled by logistics system
-            EventBus.emit(GameEvents.TRANSPORT_GOODS, null, selected.filter((s: any) => s.stats.canCarryGoods));
-          },
-        );
-        idx++;
+        commands.push({
+          icon: '\u2192', name: 'Route', key: '', color: 0xCD853F,
+          cb: () => EventBus.emit(GameEvents.TRANSPORT_GOODS, null, selected.filter((s: any) => s.stats.canCarryGoods)),
+        });
       }
 
-    } else {
-      this.actionBarBg.setVisible(false);
+      for (let i = 0; i < commands.length; i++) {
+        const cmd = commands[i];
+        const col = i % 3;
+        const row = Math.floor(i / 3);
+        const bx = gridX + col * (btnSize + gap) + btnSize / 2;
+        const by = gridY + row * (btnSize + gap) + btnSize / 2;
+
+        const bg = this.add.rectangle(bx, by, btnSize, btnSize, 0x1a1a1a, 0.9);
+        bg.setDepth(UI_DEPTH + 1);
+        bg.setStrokeStyle(1, 0x8B7355, 0.8);
+        bg.setInteractive({ useHandCursor: true });
+
+        // Icon
+        const icon = this.add.text(bx, by - 6, cmd.icon, {
+          fontSize: '18px', fontFamily: FONT_FAMILY, color: `#${cmd.color.toString(16).padStart(6, '0')}`,
+        });
+        icon.setOrigin(0.5, 0.5);
+        icon.setDepth(UI_DEPTH + 2);
+
+        // Label
+        const nameLabel = this.add.text(bx, by + 12, cmd.name, {
+          fontSize: '9px', fontFamily: FONT_FAMILY, color: '#CCCCCC',
+        });
+        nameLabel.setOrigin(0.5, 0.5);
+        nameLabel.setDepth(UI_DEPTH + 2);
+
+        // Hotkey
+        if (cmd.key) {
+          const keyLabel = this.add.text(bx + btnSize / 2 - 2, by - btnSize / 2 + 2, cmd.key, {
+            fontSize: '8px', fontFamily: FONT_FAMILY, color: '#888888',
+          });
+          keyLabel.setOrigin(1, 0);
+          keyLabel.setDepth(UI_DEPTH + 2);
+          this.actionButtons.push({ background: keyLabel as any, label: keyLabel, callback: () => {}, enabled: true });
+        }
+
+        bg.on('pointerover', () => bg.setStrokeStyle(2, 0x00FF00, 1));
+        bg.on('pointerout', () => bg.setStrokeStyle(1, 0x8B7355, 0.8));
+        bg.on('pointerdown', () => cmd.cb());
+
+        this.actionButtons.push({ background: bg, label: nameLabel, callback: cmd.cb, enabled: true });
+        this.actionButtons.push({ background: icon as any, label: icon, callback: () => {}, enabled: true });
+      }
     }
   }
 
@@ -1104,6 +1552,29 @@ export class UIScene extends Phaser.Scene {
       }
     });
 
+    // ── Pause / Resume (Feature 4) ──────────────────────────────────────
+    EventBus.on(GameEvents.GAME_PAUSED, () => {
+      this.isPaused = true;
+      this.pauseOverlay.setVisible(true);
+    });
+
+    EventBus.on(GameEvents.GAME_RESUMED, () => {
+      this.isPaused = false;
+      this.pauseOverlay.setVisible(false);
+    });
+
+    // ── Game Speed (Feature 5) ───────────────────────────────────────────
+    EventBus.on(GameEvents.GAME_SPEED_CHANGED, (speed: number) => {
+      this.currentGameSpeed = speed;
+    });
+
+    // ── Unit Produced Alert (Feature 1) ──────────────────────────────────
+    EventBus.on(GameEvents.UNIT_PRODUCED, (data: { unitType: string }) => {
+      const unitDef = UNIT_DEFS[data.unitType as keyof typeof UNIT_DEFS];
+      const name = unitDef ? unitDef.name : data.unitType;
+      this.pushAlert(`${name} trained!`, '#00FF00');
+    });
+
     // ── Minimap toggle ──────────────────────────────────────────────────
     EventBus.on('minimap:toggle', () => {
       this.minimapExpanded = !this.minimapExpanded;
@@ -1162,7 +1633,30 @@ export class UIScene extends Phaser.Scene {
     // Update action bar
     this.updateActionBar();
 
+    // Update production queue UI (Feature 1)
+    this.updateProductionQueueUI();
+
     // Update minimap periodically
     this.updateMinimap(time);
+
+    // ── Game Timer (Feature 3) ──────────────────────────────────────────
+    if (!this.isPaused) {
+      this.gameTimer += delta;
+    }
+    const totalSeconds = Math.floor(this.gameTimer / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    const mm = String(minutes).padStart(2, '0');
+    const ss = String(seconds).padStart(2, '0');
+    this.timerText.setText(`${mm}:${ss}`);
+
+    // ── Game Speed Display (Feature 5) ──────────────────────────────────
+    this.gameSpeedText.setText(`${this.currentGameSpeed.toFixed(1)}x`);
+    // Highlight speed if not 1.0x
+    if (this.currentGameSpeed !== 1.0) {
+      this.gameSpeedText.setColor('#FFFF00');
+    } else {
+      this.gameSpeedText.setColor('#88FF88');
+    }
   }
 }

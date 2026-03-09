@@ -3,9 +3,19 @@
 // depending on type. Ownership is indicated by a colored border.
 
 import Phaser from 'phaser';
-import { TILE_SIZE, CAPTURE_TIME_BASE, CAPTURE_TIME_ENEMY, PLAYER_COLORS } from '../data/config';
+import { TILE_WIDTH, TILE_HEIGHT, CAPTURE_TIME_BASE, CAPTURE_TIME_ENEMY, PLAYER_COLORS } from '../data/config';
 import { BuildingType, BuildingStats, BUILDING_DEFS } from '../data/buildings';
+import { UNIT_DEFS } from '../data/units';
 import { EventBus, GameEvents } from '../utils/EventBus';
+import { tileToWorld, isoDepth, worldToTile } from '../utils/IsometricUtils';
+
+// ─── Production Queue Entry ──────────────────────────────────────────────────
+
+interface ProductionQueueEntry {
+  unitType: string;
+  progress: number;
+  totalTime: number;
+}
 
 export class Building {
   // ─── Identity ────────────────────────────────────────────────────────────────
@@ -28,6 +38,10 @@ export class Building {
   // ─── Garrison & Storage ──────────────────────────────────────────────────────
   garrisonedSquads: string[] = [];
   goodsStored: number = 0;
+
+  // ─── Production Queue & Rally Point ────────────────────────────────────────
+  private productionQueue: ProductionQueueEntry[] = [];
+  public rallyPoint: { x: number; y: number } | null = null; // tile coords
 
   // ─── Visuals ─────────────────────────────────────────────────────────────────
   sprite: Phaser.GameObjects.Rectangle;
@@ -61,23 +75,34 @@ export class Building {
     this.hp = this.stats.hp;
     this.maxHp = this.stats.hp;
 
-    // Pixel geometry (top-left origin)
-    this.pixelX = tileX * TILE_SIZE;
-    this.pixelY = tileY * TILE_SIZE;
-    this.pixelW = this.stats.widthTiles * TILE_SIZE;
-    this.pixelH = this.stats.heightTiles * TILE_SIZE;
+    // Pixel geometry — isometric projection
+    // tileToWorld gives the center of the tile at (tileX, tileY)
+    const worldPos = tileToWorld(tileX, tileY);
+    // For multi-tile buildings, compute center of the building footprint
+    const centerTileX = tileX + (this.stats.widthTiles - 1) / 2;
+    const centerTileY = tileY + (this.stats.heightTiles - 1) / 2;
+    const centerPos = tileToWorld(centerTileX, centerTileY);
 
-    // ── Main rectangle ─────────────────────────────────────────────────────────
-    // Phaser rectangles are centered by default, so offset by half-size
-    this.sprite = scene.add.rectangle(
-      this.pixelX + this.pixelW / 2,
-      this.pixelY + this.pixelH / 2,
-      this.pixelW,
-      this.pixelH,
-      this.stats.color,
-      0.8,
-    );
-    this.sprite.setDepth(1);
+    this.pixelX = centerPos.x;
+    this.pixelY = centerPos.y;
+    // Approximate bounding box in iso space for bars/borders
+    this.pixelW = this.stats.widthTiles * TILE_WIDTH;
+    this.pixelH = this.stats.heightTiles * TILE_HEIGHT + 24; // +24 for wall height
+
+    // ── Main sprite (use isometric building texture from BootScene) ─────────
+    const textureKey = `building-${type}`;
+    if (scene.textures.exists(textureKey)) {
+      this.sprite = scene.add.sprite(this.pixelX, this.pixelY, textureKey) as any;
+    } else {
+      // Fallback: diamond-shaped rectangle at the building center
+      this.sprite = scene.add.rectangle(
+        this.pixelX, this.pixelY,
+        this.stats.widthTiles * TILE_WIDTH,
+        this.stats.heightTiles * TILE_HEIGHT,
+        this.stats.color, 0.8,
+      );
+    }
+    this.sprite.setDepth(isoDepth(tileX + this.stats.heightTiles, tileY + this.stats.heightTiles, 0));
 
     // ── Owner border ───────────────────────────────────────────────────────────
     this.borderGraphics = scene.add.graphics();
@@ -86,8 +111,8 @@ export class Building {
 
     // ── Label (first letter of building name) ──────────────────────────────────
     this.label = scene.add.text(
-      this.pixelX + this.pixelW / 2,
-      this.pixelY + this.pixelH / 2,
+      this.pixelX,
+      this.pixelY - 8,
       this.stats.name.charAt(0),
       {
         fontSize: '14px',
@@ -240,6 +265,68 @@ export class Building {
     }
   }
 
+  // ─── Production Queue ──────────────────────────────────────────────────────
+
+  /** Queue a unit for production. Max queue size = 5. Only for buildings with canProduceUnits. */
+  queueUnit(unitType: string): boolean {
+    if (!this.stats.canProduceUnits) return false;
+    if (this.productionQueue.length >= 5) return false;
+
+    const unitDef = UNIT_DEFS[unitType as keyof typeof UNIT_DEFS];
+    if (!unitDef) return false;
+
+    this.productionQueue.push({
+      unitType,
+      progress: 0,
+      totalTime: unitDef.trainTime * 1000, // convert seconds to ms
+    });
+    return true;
+  }
+
+  /** Cancel a unit in the queue at the given index. Returns the unitType if cancelled. */
+  cancelUnit(index: number): string | null {
+    if (index < 0 || index >= this.productionQueue.length) return null;
+
+    const entry = this.productionQueue[index];
+    this.productionQueue.splice(index, 1);
+    return entry.unitType;
+  }
+
+  /**
+   * Advance production. Called each frame with delta in ms.
+   * When a unit finishes, emits UNIT_PRODUCED.
+   */
+  updateProduction(delta: number): void {
+    if (!this.stats.canProduceUnits) return;
+    if (this.productionQueue.length === 0) return;
+
+    const front = this.productionQueue[0];
+    front.progress += delta;
+
+    if (front.progress >= front.totalTime) {
+      // Unit finished -- remove from queue and emit event
+      this.productionQueue.shift();
+
+      EventBus.emit(GameEvents.UNIT_PRODUCED, {
+        buildingId: this.id,
+        unitType: front.unitType,
+        tileX: this.tileX,
+        tileY: this.tileY,
+        rallyPoint: this.rallyPoint,
+      });
+    }
+  }
+
+  /** Returns the current production queue for UI display. */
+  getQueue(): ProductionQueueEntry[] {
+    return this.productionQueue;
+  }
+
+  /** Set rally point in tile coordinates. */
+  setRallyPoint(tileX: number, tileY: number): void {
+    this.rallyPoint = { x: tileX, y: tileY };
+  }
+
   // ─── Selection ───────────────────────────────────────────────────────────────
 
   /** Mark building as selected and highlight the border. */
@@ -256,11 +343,12 @@ export class Building {
 
   // ─── Update Loop ─────────────────────────────────────────────────────────────
 
-  /** Called each frame. Advances capture and refreshes visuals as needed. */
+  /** Called each frame. Advances capture, production, and refreshes visuals as needed. */
   update(delta: number): void {
     if (this.isBeingCaptured) {
       this.updateCapture(delta);
     }
+    this.updateProduction(delta);
   }
 
   // ─── Drawing Helpers ─────────────────────────────────────────────────────────
@@ -276,10 +364,10 @@ export class Building {
 
     this.healthBar.setVisible(true);
 
-    const barWidth = this.pixelW;
+    const barWidth = TILE_WIDTH * this.stats.widthTiles * 0.7;
     const barHeight = 4;
-    const barX = this.pixelX;
-    const barY = this.pixelY - 8; // above the building
+    const barX = this.pixelX - barWidth / 2;
+    const barY = this.pixelY - this.stats.heightTiles * TILE_HEIGHT / 2 - 12;
 
     // Background (dark)
     this.healthBar.fillStyle(0x222222, 0.9);
@@ -311,10 +399,10 @@ export class Building {
 
     this.captureBar.setVisible(true);
 
-    const barWidth = this.pixelW;
+    const barWidth = TILE_WIDTH * this.stats.widthTiles * 0.7;
     const barHeight = 4;
-    const barX = this.pixelX;
-    const barY = this.pixelY + this.pixelH + 2; // below the building
+    const barX = this.pixelX - barWidth / 2;
+    const barY = this.pixelY + this.stats.heightTiles * TILE_HEIGHT / 2 + 4;
 
     // Background
     this.captureBar.fillStyle(0x222222, 0.9);
@@ -336,7 +424,7 @@ export class Building {
     );
   }
 
-  /** Redraw the owner border. Highlights when selected. */
+  /** Redraw the owner border as an isometric diamond outline. */
   updateBorder(): void {
     this.borderGraphics.clear();
 
@@ -353,45 +441,59 @@ export class Building {
     const lineWidth = this.selected ? 3 : 2;
     const alpha = this.selected ? 1.0 : 0.9;
 
-    this.borderGraphics.lineStyle(lineWidth, borderColor, alpha);
-    this.borderGraphics.strokeRect(
-      this.pixelX,
-      this.pixelY,
-      this.pixelW,
-      this.pixelH,
-    );
+    // Draw an isometric diamond around the building footprint
+    const w = this.stats.widthTiles;
+    const h = this.stats.heightTiles;
+    const topPos = tileToWorld(this.tileX, this.tileY);
+    const rightPos = tileToWorld(this.tileX + w, this.tileY);
+    const bottomPos = tileToWorld(this.tileX + w, this.tileY + h);
+    const leftPos = tileToWorld(this.tileX, this.tileY + h);
 
-    // When selected, add an outer glow (white highlight)
+    this.borderGraphics.lineStyle(lineWidth, borderColor, alpha);
+    this.borderGraphics.beginPath();
+    this.borderGraphics.moveTo(topPos.x, topPos.y - TILE_HEIGHT / 2);
+    this.borderGraphics.lineTo(rightPos.x + TILE_WIDTH / 2, rightPos.y);
+    this.borderGraphics.lineTo(bottomPos.x, bottomPos.y + TILE_HEIGHT / 2);
+    this.borderGraphics.lineTo(leftPos.x - TILE_WIDTH / 2, leftPos.y);
+    this.borderGraphics.closePath();
+    this.borderGraphics.strokePath();
+
+    // When selected, add an outer glow
     if (this.selected) {
       this.borderGraphics.lineStyle(1, 0xffffff, 0.5);
-      this.borderGraphics.strokeRect(
-        this.pixelX - 2,
-        this.pixelY - 2,
-        this.pixelW + 4,
-        this.pixelH + 4,
-      );
+      this.borderGraphics.beginPath();
+      this.borderGraphics.moveTo(topPos.x, topPos.y - TILE_HEIGHT / 2 - 3);
+      this.borderGraphics.lineTo(rightPos.x + TILE_WIDTH / 2 + 3, rightPos.y);
+      this.borderGraphics.lineTo(bottomPos.x, bottomPos.y + TILE_HEIGHT / 2 + 3);
+      this.borderGraphics.lineTo(leftPos.x - TILE_WIDTH / 2 - 3, leftPos.y);
+      this.borderGraphics.closePath();
+      this.borderGraphics.strokePath();
     }
   }
 
   // ─── Spatial Queries ─────────────────────────────────────────────────────────
 
-  /** Return pixel-space bounding rectangle for this building. */
+  /** Return pixel-space bounding rectangle for this building (approximate iso bounds). */
   getBounds(): Phaser.Geom.Rectangle {
+    const halfW = this.stats.widthTiles * TILE_WIDTH / 2 + TILE_WIDTH / 2;
+    const halfH = this.stats.heightTiles * TILE_HEIGHT / 2 + TILE_HEIGHT;
     return new Phaser.Geom.Rectangle(
-      this.pixelX,
-      this.pixelY,
-      this.pixelW,
-      this.pixelH,
+      this.pixelX - halfW,
+      this.pixelY - halfH,
+      halfW * 2,
+      halfH * 2,
     );
   }
 
-  /** Check whether a pixel coordinate falls within this building. */
-  containsPoint(pixelX: number, pixelY: number): boolean {
+  /** Check whether a world pixel coordinate falls within this building's tile footprint. */
+  containsPoint(worldPixelX: number, worldPixelY: number): boolean {
+    // Convert world pixel to tile coordinates
+    const tile = worldToTile(worldPixelX, worldPixelY);
     return (
-      pixelX >= this.pixelX &&
-      pixelX < this.pixelX + this.pixelW &&
-      pixelY >= this.pixelY &&
-      pixelY < this.pixelY + this.pixelH
+      tile.x >= this.tileX &&
+      tile.x < this.tileX + this.stats.widthTiles &&
+      tile.y >= this.tileY &&
+      tile.y < this.tileY + this.stats.heightTiles
     );
   }
 

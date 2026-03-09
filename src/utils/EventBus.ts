@@ -90,8 +90,14 @@ export const GameEvents = {
   TIER_ADVANCED: 'tier:advanced',
   TIER_RESEARCH_STARTED: 'tier:research_started',
 
+  // Production
+  UNIT_PRODUCED: 'production:unit_produced',
+
   // Game state
   GAME_STARTED: 'game:started',
   GAME_OVER: 'game:over',
+  GAME_PAUSED: 'game:paused',
+  GAME_RESUMED: 'game:resumed',
+  GAME_SPEED_CHANGED: 'game:speed_changed',
   PLAYER_ELIMINATED: 'game:player_eliminated',
 } as const;

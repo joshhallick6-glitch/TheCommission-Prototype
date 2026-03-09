@@ -3,12 +3,21 @@
 // Each squad has a sprite, health bar, selection circle, and pathfinding logic.
 
 import Phaser from 'phaser';
-import { TILE_SIZE, PLAYER_COLORS } from '../data/config';
+import { TILE_SIZE, TILE_WIDTH, TILE_HEIGHT, PLAYER_COLORS } from '../data/config';
 import { UnitType, UnitStats, UNIT_DEFS } from '../data/units';
 import { pathfinding } from '../utils/Pathfinding';
 import { EventBus, GameEvents } from '../utils/EventBus';
+import { tileToWorld, isoDepth } from '../utils/IsometricUtils';
 
 let squadCounter = 0;
+
+/** Callback set by UnitSystem so squads can scan for nearby enemies during attack-move. */
+export type EnemyScanCallback = (squad: Squad, range: number) => Squad[];
+let enemyScanFn: EnemyScanCallback | null = null;
+
+export function setEnemyScanCallback(fn: EnemyScanCallback): void {
+  enemyScanFn = fn;
+}
 
 export class Squad {
   public id: string;
@@ -29,6 +38,9 @@ export class Squad {
   public state: 'idle' | 'moving' | 'attacking' | 'retreating' | 'capturing' | 'garrisoned';
   public veterancy: number;
   public carryingGoods: number;
+  public commandQueue: { type: 'move' | 'attack' | 'attackMove'; target: { x: number; y: number }; attackTarget?: Squad | null }[] = [];
+  public isAttackMoving: boolean = false;
+  private isDestroyed: boolean = false;
   public sprite: Phaser.GameObjects.Sprite;
   public healthBar: Phaser.GameObjects.Graphics;
   public selectionCircle: Phaser.GameObjects.Graphics;
@@ -91,12 +103,13 @@ export class Squad {
         const gfx = scene.add.graphics();
         if (this.stats.isVehicle) {
           gfx.fillStyle(this.stats.color, 1);
-          gfx.fillRect(0, 0, TILE_SIZE, TILE_SIZE * 0.6);
+          gfx.fillRect(4, 6, 24, 14);
         } else {
           gfx.fillStyle(this.stats.color, 1);
-          gfx.fillCircle(TILE_SIZE / 2, TILE_SIZE / 2, TILE_SIZE * 0.35);
+          gfx.fillEllipse(16, 14, 12, 8);
+          gfx.fillCircle(16, 8, 5);
         }
-        gfx.generateTexture(fallbackKey, TILE_SIZE, TILE_SIZE);
+        gfx.generateTexture(fallbackKey, 32, 24);
         gfx.destroy();
       }
       this.sprite = scene.add.sprite(px, py, fallbackKey);
@@ -108,8 +121,8 @@ export class Squad {
       this.sprite.setTint(ownerColor);
     }
 
-    // Ensure units render above terrain
-    this.sprite.setDepth(10);
+    // Isometric depth sorting — units further from camera render in front
+    this.sprite.setDepth(isoDepth(tileX, tileY, 1));
 
     // Selection circle (hidden by default)
     this.selectionCircle = scene.add.graphics();
@@ -157,13 +170,63 @@ export class Squad {
       });
   }
 
+  /** Move toward a destination, but engage any enemies encountered along the way. */
+  attackMoveTo(tileX: number, tileY: number): void {
+    this.isAttackMoving = true;
+    this.moveTo(tileX, tileY);
+  }
+
+  /** Add a command to the back of the queue (for shift-click waypoints). */
+  queueCommand(cmd: { type: 'move' | 'attack' | 'attackMove'; target: { x: number; y: number }; attackTarget?: Squad | null }): void {
+    this.commandQueue.push(cmd);
+  }
+
+  /** Pop and execute the next queued command. */
+  private executeNextCommand(): void {
+    if (this.commandQueue.length === 0) return;
+    const cmd = this.commandQueue.shift()!;
+    if (cmd.type === 'move') {
+      this.moveTo(cmd.target.x, cmd.target.y);
+    } else if (cmd.type === 'attackMove') {
+      this.attackMoveTo(cmd.target.x, cmd.target.y);
+    } else if (cmd.type === 'attack' && cmd.attackTarget && cmd.attackTarget.hp > 0) {
+      this.attackTarget = cmd.attackTarget;
+      this.state = 'attacking';
+      if (!this.isInRange(cmd.attackTarget)) {
+        this.moveTo(cmd.attackTarget.tileX, cmd.attackTarget.tileY);
+      }
+    }
+  }
+
   // ─── Main Update ────────────────────────────────────────────────────────────
 
   update(delta: number): void {
+    if (this.isDestroyed) return;
+
     const dt = delta / 1000; // convert ms to seconds
 
     if (this.isMoving && this.path.length > 0) {
       this.updateMovement(dt);
+    }
+
+    // Attack-move scan: while moving toward the destination, check for nearby enemies
+    if (this.isAttackMoving && this.isMoving && this.state === 'moving' && enemyScanFn) {
+      const enemies = enemyScanFn(this, this.stats.sightRange);
+      if (enemies.length > 0) {
+        // Engage the closest enemy
+        let closest = enemies[0];
+        let closestDist = this.distanceTo(closest);
+        for (let i = 1; i < enemies.length; i++) {
+          const d = this.distanceTo(enemies[i]);
+          if (d < closestDist) {
+            closestDist = d;
+            closest = enemies[i];
+          }
+        }
+        this.isMoving = false;
+        this.attackTarget = closest;
+        this.state = 'attacking';
+      }
     }
 
     if (this.state === 'attacking' && this.attackTarget) {
@@ -172,6 +235,7 @@ export class Squad {
 
     // Sync visuals to current interpolated position
     this.sprite.setPosition(this.pixelPosX, this.pixelPosY);
+    this.sprite.setDepth(isoDepth(this.tileX, this.tileY, 1));
     this.drawHealthBar();
     this.updateSelectionCirclePosition();
   }
@@ -180,24 +244,29 @@ export class Squad {
     if (this.pathIndex >= this.path.length) {
       // Reached end of path
       this.isMoving = false;
+      this.isAttackMoving = false;
       this.state = 'idle';
       this.path = [];
       this.pathIndex = 0;
       // Snap to final tile center
       this.pixelPosX = this.getPixelX();
       this.pixelPosY = this.getPixelY();
+
+      // Execute next queued command if any
+      this.executeNextCommand();
       return;
     }
 
     const target = this.path[this.pathIndex];
-    const targetPx = target.x * TILE_SIZE + TILE_SIZE / 2;
-    const targetPy = target.y * TILE_SIZE + TILE_SIZE / 2;
+    const targetWorld = tileToWorld(target.x, target.y);
+    const targetPx = targetWorld.x;
+    const targetPy = targetWorld.y;
 
     const dx = targetPx - this.pixelPosX;
     const dy = targetPy - this.pixelPosY;
     const dist = Math.sqrt(dx * dx + dy * dy);
 
-    const speed = this.stats.speed * TILE_SIZE; // pixels per second
+    const speed = this.stats.speed * TILE_WIDTH; // pixels per second (using iso tile width)
     const moveAmount = speed * dt;
 
     if (dist <= moveAmount) {
@@ -219,6 +288,21 @@ export class Squad {
   private updateCombat(dt: number): void {
     if (!this.attackTarget || this.attackTarget.hp <= 0) {
       this.attackTarget = null;
+
+      // If attack-moving, resume movement toward the original destination
+      if (this.isAttackMoving) {
+        this.state = 'moving';
+        if (this.path.length > 0) {
+          this.isMoving = true;
+        } else {
+          // Original path was consumed or never set; re-path to the destination
+          this.isAttackMoving = false;
+          this.state = 'idle';
+          this.executeNextCommand();
+        }
+        return;
+      }
+
       this.state = 'idle';
       return;
     }
@@ -233,6 +317,19 @@ export class Squad {
       // Move toward target if out of range
       this.moveTo(this.attackTarget.tileX, this.attackTarget.tileY);
     }
+  }
+
+  // ─── Stop ─────────────────────────────────────────────────────────────────────
+
+  /** Clear all movement and attack orders, return to idle. */
+  stop(): void {
+    this.isMoving = false;
+    this.isAttackMoving = false;
+    this.path = [];
+    this.pathIndex = 0;
+    this.attackTarget = null;
+    this.commandQueue = [];
+    this.state = 'idle';
   }
 
   // ─── Damage & Death ─────────────────────────────────────────────────────────
@@ -252,18 +349,50 @@ export class Squad {
   }
 
   die(): void {
+    if (this.isDestroyed) return;
+
     EventBus.emit(GameEvents.SQUAD_WIPED, this);
-    this.destroy();
+
+    // Hide health bar and selection circle immediately
+    this.healthBar.setVisible(false);
+    this.selectionCircle.setVisible(false);
+
+    // Death effect: expanding ring that fades
+    const deathEffect = this.scene.add.graphics();
+    deathEffect.setDepth(15);
+    const ringRadius = this.stats.isVehicle ? 20 : 12;
+    deathEffect.lineStyle(2, this.stats.isVehicle ? 0xFF4400 : 0xFF0000, 1);
+    deathEffect.strokeCircle(this.pixelPosX, this.pixelPosY, ringRadius);
+
+    this.scene.tweens.add({
+      targets: deathEffect,
+      alpha: 0,
+      scaleX: 2,
+      scaleY: 2,
+      duration: 500,
+      onComplete: () => deathEffect.destroy(),
+    });
+
+    // Flash sprite red then fade out, destroy when complete
+    this.sprite.setTint(0xFF0000);
+    this.scene.tweens.add({
+      targets: this.sprite,
+      alpha: 0,
+      duration: 400,
+      onComplete: () => this.destroy(),
+    });
   }
 
   // ─── Utility ────────────────────────────────────────────────────────────────
 
   getPixelX(): number {
-    return this.tileX * TILE_SIZE + TILE_SIZE / 2;
+    const pos = tileToWorld(this.tileX, this.tileY);
+    return pos.x;
   }
 
   getPixelY(): number {
-    return this.tileY * TILE_SIZE + TILE_SIZE / 2;
+    const pos = tileToWorld(this.tileX, this.tileY);
+    return pos.y;
   }
 
   distanceTo(other: Squad): number {
@@ -281,10 +410,10 @@ export class Squad {
   drawHealthBar(): void {
     this.healthBar.clear();
 
-    const barWidth = TILE_SIZE;
-    const barHeight = 4;
+    const barWidth = TILE_WIDTH * 0.6;
+    const barHeight = 3;
     const barX = this.pixelPosX - barWidth / 2;
-    const barY = this.pixelPosY - TILE_SIZE / 2 - barHeight - 2;
+    const barY = this.pixelPosY - TILE_HEIGHT * 0.8 - barHeight;
     const healthPercent = this.hp / this.maxHp;
 
     // Background (dark)
@@ -305,19 +434,22 @@ export class Squad {
   private drawSelectionCircle(): void {
     this.selectionCircle.clear();
     this.selectionCircle.lineStyle(2, 0x00ff00, 0.8);
-    this.selectionCircle.strokeCircle(this.pixelPosX, this.pixelPosY, TILE_SIZE * 0.55);
+    // Isometric ellipse: wider than tall to match diamond tile perspective
+    this.selectionCircle.strokeEllipse(this.pixelPosX, this.pixelPosY, TILE_WIDTH * 0.6, TILE_HEIGHT * 0.6);
   }
 
   private updateSelectionCirclePosition(): void {
     if (!this.isSelected) return;
     this.selectionCircle.clear();
     this.selectionCircle.lineStyle(2, 0x00ff00, 0.8);
-    this.selectionCircle.strokeCircle(this.pixelPosX, this.pixelPosY, TILE_SIZE * 0.55);
+    this.selectionCircle.strokeEllipse(this.pixelPosX, this.pixelPosY, TILE_WIDTH * 0.6, TILE_HEIGHT * 0.6);
   }
 
   // ─── Cleanup ────────────────────────────────────────────────────────────────
 
   destroy(): void {
+    if (this.isDestroyed) return;
+    this.isDestroyed = true;
     this.sprite.destroy();
     this.healthBar.destroy();
     this.selectionCircle.destroy();

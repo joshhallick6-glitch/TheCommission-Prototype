@@ -29,8 +29,10 @@ import { CombatSystem } from '../systems/CombatSystem';
 import { EconomySystem } from '../systems/EconomySystem';
 import { LogisticsSystem } from '../systems/LogisticsSystem';
 import { TerritorySystem } from '../systems/TerritorySystem';
+import { FogOfWarSystem } from '../systems/FogOfWarSystem';
 import { pathfinding } from '../utils/Pathfinding';
 import { EventBus, GameEvents } from '../utils/EventBus';
+import { tileToWorld, worldToTile as isoWorldToTile } from '../utils/IsometricUtils';
 
 // ─── Keyboard key references ────────────────────────────────────────────────
 
@@ -56,6 +58,7 @@ export class GameScene extends Phaser.Scene {
   economySystem: any = null;
   logisticsSystem: any = null;
   territorySystem: any = null;
+  fogOfWarSystem: FogOfWarSystem | null = null;
 
   // ── Tilemap reference ─────────────────────────────────────────────────
   tilemap!: Phaser.Tilemaps.Tilemap;
@@ -70,6 +73,27 @@ export class GameScene extends Phaser.Scene {
   private actionKeys!: Record<string, Phaser.Input.Keyboard.Key>;
   private selectedBuilding: any = null;
   private spaceCycleIndex: number = 0;
+
+  // ── Control Groups (Feature 2) ──────────────────────────────────────
+  private controlGroups: Map<number, string[]> = new Map();
+  private lastGroupKeyTime: Map<number, number> = new Map();
+
+  // ── Double-Click Detection (Feature 7) ──────────────────────────────
+  private lastClickTime: number = 0;
+  private lastClickX: number = 0;
+  private lastClickY: number = 0;
+
+  // ── Idle Unit Finder (Feature 8) ────────────────────────────────────
+  private idleCycleIndex: number = 0;
+
+  // ── Attack-Move Mode ──────────────────────────────────────────────
+  private attackMoveMode: boolean = false;
+
+  // ── Pause (Feature 4) ──────────────────────────────────────────────
+  private isPaused: boolean = false;
+
+  // ── Game Speed (Feature 5) ─────────────────────────────────────────
+  private gameSpeed: number = 1.0;
 
   constructor() {
     super({ key: 'GameScene' });
@@ -124,28 +148,60 @@ export class GameScene extends Phaser.Scene {
     const corners = this.mapSystem.placeStreetCorners();
     this.territorySystem.initializeCorners(corners);
 
+    // ── 8b. Initialize fog of war system ────────────────────────────────
+    this.fogOfWarSystem = new FogOfWarSystem(this, 2);
+
     // ── 9. Center camera on Player 0's compound ─────────────────────────
     const p0Compound = this.buildingSystem.getCompound(0);
     if (p0Compound) {
-      const cx = p0Compound.tileX * TILE_SIZE + (p0Compound.stats.widthTiles * TILE_SIZE) / 2;
-      const cy = p0Compound.tileY * TILE_SIZE + (p0Compound.stats.heightTiles * TILE_SIZE) / 2;
-      cam.centerOn(cx, cy);
+      const centerTile = tileToWorld(
+        p0Compound.tileX + Math.floor(p0Compound.stats.widthTiles / 2),
+        p0Compound.tileY + Math.floor(p0Compound.stats.heightTiles / 2),
+      );
+      cam.centerOn(centerTile.x, centerTile.y);
     } else {
-      // Fallback: center on P1 start neighborhood area
-      cam.centerOn(20 * TILE_SIZE, 140 * TILE_SIZE);
+      // Fallback: center on map center
+      const fallback = tileToWorld(80, 80);
+      cam.centerOn(fallback.x, fallback.y);
     }
 
-    // ── 10. Spawn starting units ────────────────────────────────────────
+    // ── 10. Listen for unit production ──────────────────────────────────
+    EventBus.on(GameEvents.UNIT_PRODUCED, (data: {
+      buildingId: string;
+      unitType: string;
+      tileX: number;
+      tileY: number;
+      rallyPoint: { x: number; y: number } | null;
+    }) => {
+      // Spawn the new squad at the building's position
+      const spawnPos = this.findNearbyWalkable(
+        data.tileX + 2, // offset to spawn outside the building
+        data.tileY + 2,
+      );
+      const newSquad = this.unitSystem.spawnSquad(
+        data.unitType as UnitType,
+        0, // player 0 -- only player buildings produce
+        spawnPos.x,
+        spawnPos.y,
+      );
+
+      // If rally point exists, issue a move command to it
+      if (data.rallyPoint) {
+        newSquad.moveTo(data.rallyPoint.x, data.rallyPoint.y);
+      }
+    });
+
+    // ── 11. Spawn starting units ────────────────────────────────────────
     this.spawnStartingUnits();
 
-    // ── 11. Set up input handling ───────────────────────────────────────
+    // ── 12. Set up input handling ───────────────────────────────────────
     this.setupKeyboardInput();
     this.setupMouseInput();
 
-    // ── 12. Launch UI scene in parallel ─────────────────────────────────
+    // ── 13. Launch UI scene in parallel ─────────────────────────────────
     this.scene.launch('UIScene');
 
-    // ── 13. Signal game started ─────────────────────────────────────────
+    // ── 14. Signal game started ─────────────────────────────────────────
     EventBus.emit(GameEvents.GAME_STARTED);
   }
 
@@ -229,7 +285,7 @@ export class GameScene extends Phaser.Scene {
       RIGHT: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.RIGHT),
     };
 
-    // Action keys (use keydown events so they fire once, not held)
+    // Action keys
     this.actionKeys = {
       STOP: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.S),
       RETREAT: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.R),
@@ -237,16 +293,9 @@ export class GameScene extends Phaser.Scene {
       TIER: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.T),
       SPACE: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE),
       TAB: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.TAB),
-      ONE: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.ONE),
-      TWO: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.TWO),
-      THREE: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.THREE),
-      FOUR: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.FOUR),
-      FIVE: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.FIVE),
     };
 
-    // ── Stop selected units (S key -- only when no camera pan) ──────────
-    // We use the S key for both camera pan and stop command. Stop fires
-    // on keydown only when the key is tapped briefly (< 200ms).
+    // ── Standard action hotkeys ─────────────────────────────────────────
     this.input.keyboard.on('keydown-R', () => this.handleRetreat());
     this.input.keyboard.on('keydown-G', () => this.handleGarrison());
     this.input.keyboard.on('keydown-T', () => this.handleTierAdvance());
@@ -256,12 +305,71 @@ export class GameScene extends Phaser.Scene {
       this.handleMinimapToggle();
     });
 
-    // Quick-produce unit hotkeys (1-5)
-    this.input.keyboard.on('keydown-ONE', () => this.handleProduceUnit(UnitType.RUNNER));
-    this.input.keyboard.on('keydown-TWO', () => this.handleProduceUnit(UnitType.THUG));
-    this.input.keyboard.on('keydown-THREE', () => this.handleProduceUnit(UnitType.ENFORCER));
-    this.input.keyboard.on('keydown-FOUR', () => this.handleProduceUnit(UnitType.ARSONIST));
-    this.input.keyboard.on('keydown-FIVE', () => this.handleProduceUnit(UnitType.LOOKOUT));
+    // ── Stop command (X key, Feature 6) ─────────────────────────────────
+    this.input.keyboard.on('keydown-X', () => this.handleStopSelected());
+
+    // ── Pause (P key, Feature 4) ────────────────────────────────────────
+    this.input.keyboard.on('keydown-P', () => this.handlePauseToggle());
+
+    // ── Game speed (+/- keys, Feature 5) ────────────────────────────────
+    this.input.keyboard.on('keydown-PLUS', () => this.handleSpeedChange(0.5));
+    this.input.keyboard.on('keydown-MINUS', () => this.handleSpeedChange(-0.5));
+
+    // ── Idle unit finder (Period key, Feature 8) ────────────────────────
+    this.input.keyboard.on('keydown-PERIOD', () => this.handleIdleCycle());
+
+    // ── Control groups (Ctrl+1-9 to assign, 1-9 to recall, Feature 2) ──
+    // Also: Ctrl+Q/W/E/R/T for unit production shortcuts (replaces 1-5)
+    const numberKeyNames = ['ONE', 'TWO', 'THREE', 'FOUR', 'FIVE', 'SIX', 'SEVEN', 'EIGHT', 'NINE'];
+    for (let i = 0; i < 9; i++) {
+      const keyName = numberKeyNames[i];
+      const groupNum = i + 1;
+      this.input.keyboard.on(`keydown-${keyName}`, (event: KeyboardEvent) => {
+        if (event.ctrlKey) {
+          // Ctrl+Number: Assign control group
+          this.assignControlGroup(groupNum);
+        } else {
+          // Number only: Recall control group
+          this.recallControlGroup(groupNum);
+        }
+      });
+    }
+
+    // ── Attack-Move toggle (A key tap with units selected) ─────────
+    // The A key is also used for camera scrolling (held down). To avoid
+    // conflict, attack-move mode only toggles on keyup if A was held
+    // briefly (< 200ms), and only when the player has units selected.
+    let aKeyDownTime = 0;
+    this.input.keyboard.on('keydown-A', () => {
+      aKeyDownTime = this.time.now;
+    });
+    this.input.keyboard.on('keyup-A', () => {
+      const held = this.time.now - aKeyDownTime;
+      if (held < 200 && this.unitSystem.selectedSquads.length > 0) {
+        this.attackMoveMode = !this.attackMoveMode;
+      }
+    });
+
+    // ── Cancel attack-move on ESC ────────────────────────────────────
+    this.input.keyboard.on('keydown-ESC', () => {
+      this.attackMoveMode = false;
+    });
+
+    // ── Production shortcuts via Ctrl+Q/W/E/R/T ────────────────────────
+    this.input.keyboard.on('keydown-Q', (event: KeyboardEvent) => {
+      if (event.ctrlKey) {
+        event.preventDefault();
+        this.handleProduceUnit(UnitType.RUNNER);
+      }
+    });
+    // Note: Ctrl+W would close the browser tab, so we skip it
+    this.input.keyboard.on('keydown-E', (event: KeyboardEvent) => {
+      if (event.ctrlKey) {
+        event.preventDefault();
+        this.handleProduceUnit(UnitType.ENFORCER);
+      }
+    });
+    // Note: Ctrl+R would reload the page, so we use just the action bar for THUG/ARSONIST/LOOKOUT
   }
 
   private setupMouseInput(): void {
@@ -305,6 +413,9 @@ export class GameScene extends Phaser.Scene {
   // ═══════════════════════════════════════════════════════════════════════
 
   private handleLeftClickDown(pointer: Phaser.Input.Pointer): void {
+    // Cancel attack-move mode on any left-click
+    this.attackMoveMode = false;
+
     const worldPos = this.getPointerWorldPosition();
     this.selectionStart = { x: worldPos.x, y: worldPos.y };
     this.isDragging = false;
@@ -321,21 +432,21 @@ export class GameScene extends Phaser.Scene {
     if (!this.isDragging && Math.abs(dx) + Math.abs(dy) > 5) {
       this.isDragging = true;
 
-      // Create selection box visual
+      // Create selection box visual (AoE2-style green box)
       this.selectionBox = this.add.rectangle(
         this.selectionStart.x,
         this.selectionStart.y,
         1,
         1,
         0x00ff00,
-        0.15,
+        0.1,
       );
-      this.selectionBox.setStrokeStyle(1, 0x00ff00, 0.8);
+      this.selectionBox.setStrokeStyle(1.5, 0x00ff00, 0.9);
       this.selectionBox.setDepth(50);
       this.selectionBox.setOrigin(0, 0);
     }
 
-    // Update selection box visual
+    // Update selection box visual and preview highlighting
     if (this.isDragging && this.selectionBox) {
       const x = Math.min(this.selectionStart.x, worldPos.x);
       const y = Math.min(this.selectionStart.y, worldPos.y);
@@ -343,6 +454,29 @@ export class GameScene extends Phaser.Scene {
       const h = Math.abs(dy);
       this.selectionBox.setPosition(x, y);
       this.selectionBox.setSize(w, h);
+
+      // Real-time drag preview: show selection circles for units inside the box
+      this.updateDragPreview(x, y, x + w, y + h);
+    }
+  }
+
+  /** Show/hide selection circles during drag to preview which units will be selected. */
+  private updateDragPreview(x1: number, y1: number, x2: number, y2: number): void {
+    for (const squad of this.unitSystem.squads.values()) {
+      if (squad.owner !== 0) continue;
+      const px = squad.getPixelX();
+      const py = squad.getPixelY();
+      const inBox = px >= x1 && px <= x2 && py >= y1 && py <= y2;
+
+      if (inBox && !squad.isSelected) {
+        // Preview: show selection circle temporarily
+        squad.selectionCircle.setVisible(true);
+        squad.selectionCircle.setAlpha(0.5);
+      } else if (!inBox && !squad.isSelected) {
+        // Not in box and not already selected: hide
+        squad.selectionCircle.setVisible(false);
+        squad.selectionCircle.setAlpha(1);
+      }
     }
   }
 
@@ -352,6 +486,9 @@ export class GameScene extends Phaser.Scene {
 
     if (this.isDragging && this.selectionStart) {
       // ── Box selection ─────────────────────────────────────────────────
+      // Clean up drag preview highlighting
+      this.clearDragPreview();
+
       if (!shiftHeld) {
         this.unitSystem.deselectAll();
         this.deselectBuilding();
@@ -378,11 +515,45 @@ export class GameScene extends Phaser.Scene {
     this.isDragging = false;
   }
 
+  /** Reset all drag preview selection circles to normal state. */
+  private clearDragPreview(): void {
+    for (const squad of this.unitSystem.squads.values()) {
+      if (!squad.isSelected) {
+        squad.selectionCircle.setVisible(false);
+        squad.selectionCircle.setAlpha(1);
+      }
+    }
+  }
+
   private handleSingleClick(worldX: number, worldY: number, shiftHeld: boolean): void {
+    const now = this.time.now;
+    const dx = worldX - this.lastClickX;
+    const dy = worldY - this.lastClickY;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    const isDoubleClick = (now - this.lastClickTime < 300) && (dist < 10);
+
+    // Update click tracking for next call
+    this.lastClickTime = now;
+    this.lastClickX = worldX;
+    this.lastClickY = worldY;
+
     // Check if clicked on a squad (player 0 only)
     const squad = this.unitSystem.getSquadAtPixel(worldX, worldY);
 
     if (squad && squad.owner === 0) {
+      // ── Double-click: select all of same type on screen (Feature 7) ──
+      if (isDoubleClick) {
+        const cam = this.cameras.main;
+        const cameraBounds = new Phaser.Geom.Rectangle(
+          cam.worldView.x,
+          cam.worldView.y,
+          cam.worldView.width,
+          cam.worldView.height,
+        );
+        this.unitSystem.selectAllOfType(squad.stats.type, cameraBounds, 0);
+        return;
+      }
+
       if (shiftHeld) {
         this.unitSystem.addToSelection(squad);
       } else {
@@ -412,6 +583,31 @@ export class GameScene extends Phaser.Scene {
   private handleRightClick(pointer: Phaser.Input.Pointer): void {
     const worldPos = this.getPointerWorldPosition();
     const tilePos = this.worldToTile(worldPos.x, worldPos.y);
+    const shiftHeld = pointer.event.shiftKey;
+
+    // ── Rally point: right-click while production building is selected ──
+    if (
+      this.selectedBuilding &&
+      this.selectedBuilding.stats.canProduceUnits &&
+      this.selectedBuilding.owner === 0 &&
+      this.unitSystem.selectedSquads.length === 0
+    ) {
+      this.selectedBuilding.setRallyPoint(tilePos.x, tilePos.y);
+      return;
+    }
+
+    // ── Attack-move mode: move to location but engage enemies en route ──
+    if (this.attackMoveMode && this.unitSystem.selectedSquads.length > 0) {
+      for (const squad of this.unitSystem.selectedSquads) {
+        if (shiftHeld) {
+          squad.queueCommand({ type: 'attackMove', target: { x: tilePos.x, y: tilePos.y } });
+        } else {
+          squad.attackMoveTo(tilePos.x, tilePos.y);
+        }
+      }
+      this.attackMoveMode = false;
+      return;
+    }
 
     // Check what's at the target position
     const targetSquad = this.unitSystem.getSquadAtPixel(worldPos.x, worldPos.y);
@@ -419,11 +615,17 @@ export class GameScene extends Phaser.Scene {
 
     if (targetSquad && targetSquad.owner !== 0) {
       // ── Right click on enemy squad: Attack order ──────────────────────
-      this.unitSystem.attackWithSelected(targetSquad);
+      if (shiftHeld) {
+        for (const squad of this.unitSystem.selectedSquads) {
+          squad.queueCommand({ type: 'attack', target: { x: targetSquad.tileX, y: targetSquad.tileY }, attackTarget: targetSquad });
+        }
+      } else {
+        this.unitSystem.attackWithSelected(targetSquad);
 
-      // Also register with combat system
-      for (const squad of this.unitSystem.selectedSquads) {
-        this.combatSystem.engageTarget(squad, targetSquad);
+        // Also register with combat system
+        for (const squad of this.unitSystem.selectedSquads) {
+          this.combatSystem.engageTarget(squad, targetSquad);
+        }
       }
 
       EventBus.emit(GameEvents.ATTACK_ORDER, targetSquad);
@@ -440,7 +642,14 @@ export class GameScene extends Phaser.Scene {
       }
     } else {
       // ── Empty ground: Move order ──────────────────────────────────────
-      this.unitSystem.moveSelectedTo(tilePos.x, tilePos.y);
+      if (shiftHeld) {
+        // Shift+right-click: queue a waypoint instead of replacing the current order
+        for (const squad of this.unitSystem.selectedSquads) {
+          squad.queueCommand({ type: 'move', target: { x: tilePos.x, y: tilePos.y } });
+        }
+      } else {
+        this.unitSystem.moveSelectedTo(tilePos.x, tilePos.y);
+      }
       EventBus.emit(GameEvents.MOVE_ORDER, tilePos.x, tilePos.y);
     }
   }
@@ -569,8 +778,12 @@ export class GameScene extends Phaser.Scene {
 
       this.spaceCycleIndex = this.spaceCycleIndex % ownedBuildings.length;
       const building = ownedBuildings[this.spaceCycleIndex];
-      const cx = building.tileX * TILE_SIZE + (building.stats.widthTiles * TILE_SIZE) / 2;
-      const cy = building.tileY * TILE_SIZE + (building.stats.heightTiles * TILE_SIZE) / 2;
+      const bldgCenter = tileToWorld(
+        building.tileX + Math.floor(building.stats.widthTiles / 2),
+        building.tileY + Math.floor(building.stats.heightTiles / 2),
+      );
+      const cx = bldgCenter.x;
+      const cy = bldgCenter.y;
       this.cameras.main.centerOn(cx, cy);
       this.selectBuilding(building);
       this.spaceCycleIndex++;
@@ -579,6 +792,79 @@ export class GameScene extends Phaser.Scene {
 
   private handleMinimapToggle(): void {
     EventBus.emit('minimap:toggle');
+  }
+
+  // ── Control Group Handlers (Feature 2) ─────────────────────────────
+
+  private assignControlGroup(groupNum: number): void {
+    if (this.unitSystem.selectedSquads.length === 0) return;
+    const ids = this.unitSystem.selectedSquads.map((s) => s.id);
+    this.controlGroups.set(groupNum, ids);
+  }
+
+  private recallControlGroup(groupNum: number): void {
+    const ids = this.controlGroups.get(groupNum);
+    if (!ids || ids.length === 0) return;
+
+    const now = this.time.now;
+    const lastTime = this.lastGroupKeyTime.get(groupNum) ?? 0;
+    const isDoubleTap = now - lastTime < 300;
+    this.lastGroupKeyTime.set(groupNum, now);
+
+    // Select the squads in the group
+    this.unitSystem.selectSquadsById(ids);
+
+    // Double-tap: center camera on group centroid
+    if (isDoubleTap) {
+      let cx = 0;
+      let cy = 0;
+      let count = 0;
+      for (const id of ids) {
+        const squad = this.unitSystem.squads.get(id);
+        if (squad) {
+          cx += squad.getPixelX();
+          cy += squad.getPixelY();
+          count++;
+        }
+      }
+      if (count > 0) {
+        this.cameras.main.centerOn(cx / count, cy / count);
+      }
+    }
+  }
+
+  // ── Pause Handler (Feature 4) ─────────────────────────────────────
+
+  private handlePauseToggle(): void {
+    this.isPaused = !this.isPaused;
+    if (this.isPaused) {
+      EventBus.emit(GameEvents.GAME_PAUSED);
+    } else {
+      EventBus.emit(GameEvents.GAME_RESUMED);
+    }
+  }
+
+  // ── Game Speed Handler (Feature 5) ────────────────────────────────
+
+  private handleSpeedChange(delta: number): void {
+    this.gameSpeed = Math.max(0.5, Math.min(3.0, this.gameSpeed + delta));
+    EventBus.emit(GameEvents.GAME_SPEED_CHANGED, this.gameSpeed);
+  }
+
+  // ── Idle Unit Finder (Feature 8) ──────────────────────────────────
+
+  private handleIdleCycle(): void {
+    const idleSquads = this.unitSystem.getIdleSquads(0);
+    if (idleSquads.length === 0) return;
+
+    this.idleCycleIndex = this.idleCycleIndex % idleSquads.length;
+    const squad = idleSquads[this.idleCycleIndex];
+
+    // Select and center on the idle squad
+    this.unitSystem.selectSquadsById([squad.id]);
+    this.cameras.main.centerOn(squad.getPixelX(), squad.getPixelY());
+
+    this.idleCycleIndex++;
   }
 
   private handleProduceUnit(unitType: UnitType): void {
@@ -598,23 +884,15 @@ export class GameScene extends Phaser.Scene {
       this.economySystem.spendCash(0, unitDef.cost);
     }
 
-    // Spawn the unit near the compound
-    const spawnPos = this.findNearbyWalkable(
-      compound.tileX + compound.stats.widthTiles + 1,
-      compound.tileY + Math.floor(compound.stats.heightTiles / 2),
-    );
-    this.unitSystem.spawnSquad(unitType, 0, spawnPos.x, spawnPos.y);
+    // Queue the unit for production instead of instant spawn
+    compound.queueUnit(unitType);
 
     EventBus.emit(GameEvents.PRODUCE_UNIT, unitType, 0);
   }
 
   handleStopSelected(): void {
     for (const squad of this.unitSystem.selectedSquads) {
-      squad.isMoving = false;
-      squad.path = [];
-      squad.pathIndex = 0;
-      squad.state = 'idle';
-      squad.attackTarget = null;
+      squad.stop();
       this.combatSystem.disengageAll(squad.id);
     }
   }
@@ -642,23 +920,24 @@ export class GameScene extends Phaser.Scene {
   // ═══════════════════════════════════════════════════════════════════════
 
   update(time: number, delta: number): void {
-    // ── 1. Camera scrolling from keyboard and edge ──────────────────────
+    // ── 1. Camera scrolling from keyboard and edge (always responsive) ──
     this.updateCameraScroll(delta);
 
-    // ── 2. Handle S key for stop (check if it was a quick tap, not held for camera) ──
-    if (this.actionKeys?.STOP?.isDown && this.actionKeys.STOP.getDuration() < 150) {
-      // S key is shared with camera movement -- only fire stop on release
-    }
+    // ── 2. If paused, skip all system updates (Feature 4) ───────────────
+    if (this.isPaused) return;
 
-    // ── 3. Update all systems ───────────────────────────────────────────
+    // ── 3. Apply game speed multiplier (Feature 5) ──────────────────────
+    const scaledDelta = delta * this.gameSpeed;
+
+    // ── 4. Update all systems ───────────────────────────────────────────
     // Pathfinding is updated inside unitSystem.update
-    this.unitSystem.update(delta);
-    this.buildingSystem.update(delta);
-    this.combatSystem.update(delta);
+    this.unitSystem.update(scaledDelta);
+    this.buildingSystem.update(scaledDelta);
+    this.combatSystem.update(scaledDelta);
 
     if (this.economySystem) {
       this.economySystem.update(
-        delta,
+        scaledDelta,
         (owner: number) => this.buildingSystem.getBuildingsByOwner(owner),
         (neighborhood: string, player: number) =>
           this.territorySystem
@@ -670,7 +949,7 @@ export class GameScene extends Phaser.Scene {
 
     if (this.logisticsSystem) {
       this.logisticsSystem.update(
-        delta,
+        scaledDelta,
         (id: string) => this.unitSystem.squads.get(id) ?? null,
         (id: string) => this.buildingSystem.buildings.get(id) ?? null,
         (player: number, amount: number) => this.economySystem?.addGoods(player, amount),
@@ -682,12 +961,23 @@ export class GameScene extends Phaser.Scene {
 
     if (this.territorySystem) {
       this.territorySystem.update(
-        delta,
+        scaledDelta,
         (x: number, y: number, radius: number) => this.unitSystem.getSquadsAt(x, y, radius),
       );
     }
 
-    // ── 4. Validate captures (check unit proximity) ─────────────────────
+    // ── 5. Update fog of war ────────────────────────────────────────────
+    if (this.fogOfWarSystem) {
+      this.fogOfWarSystem.update(
+        scaledDelta,
+        0, // player index (human player)
+        Array.from(this.unitSystem.squads.values()),
+        Array.from(this.buildingSystem.buildings.values()),
+        this.cameras.main,
+      );
+    }
+
+    // ── 6. Validate captures (check unit proximity) ─────────────────────
     this.buildingSystem.validateCaptures(
       (buildingId: string, playerIndex: number, radiusTiles: number) => {
         const building = this.buildingSystem.buildings.get(buildingId);
@@ -765,20 +1055,14 @@ export class GameScene extends Phaser.Scene {
   // COORDINATE HELPERS
   // ═══════════════════════════════════════════════════════════════════════
 
-  /** Convert a world pixel position to tile coordinates. */
+  /** Convert a world pixel position to tile coordinates (isometric). */
   worldToTile(pixelX: number, pixelY: number): { x: number; y: number } {
-    return {
-      x: Math.floor(pixelX / TILE_SIZE),
-      y: Math.floor(pixelY / TILE_SIZE),
-    };
+    return isoWorldToTile(pixelX, pixelY);
   }
 
-  /** Convert tile coordinates to world pixel position (center of tile). */
+  /** Convert tile coordinates to world pixel position (isometric). */
   tileToWorld(tileX: number, tileY: number): { x: number; y: number } {
-    return {
-      x: tileX * TILE_SIZE + TILE_SIZE / 2,
-      y: tileY * TILE_SIZE + TILE_SIZE / 2,
-    };
+    return tileToWorld(tileX, tileY);
   }
 
   /**

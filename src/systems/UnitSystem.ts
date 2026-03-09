@@ -5,7 +5,7 @@
 import Phaser from 'phaser';
 import { TILE_SIZE } from '../data/config';
 import { UnitType } from '../data/units';
-import { Squad } from '../entities/Squad';
+import { Squad, setEnemyScanCallback } from '../entities/Squad';
 import { pathfinding } from '../utils/Pathfinding';
 import { EventBus, GameEvents } from '../utils/EventBus';
 
@@ -23,6 +23,9 @@ export class UnitSystem {
 
     // Clean up dead squads
     EventBus.on(GameEvents.SQUAD_WIPED, this.onSquadWiped);
+
+    // Provide squads with a way to scan for nearby enemies (for attack-move)
+    setEnemyScanCallback((squad: Squad, range: number) => this.getEnemiesInRange(squad, range));
   }
 
   // ─── Lifecycle ──────────────────────────────────────────────────────────────
@@ -66,6 +69,19 @@ export class UnitSystem {
       const dy = squad.tileY - tileY;
       if (Math.sqrt(dx * dx + dy * dy) <= radius) {
         results.push(squad);
+      }
+    }
+    return results;
+  }
+
+  /** Return all enemy squads within a tile distance of the given squad. */
+  getEnemiesInRange(squad: Squad, range: number): Squad[] {
+    const results: Squad[] = [];
+    for (const other of this.squads.values()) {
+      if (other.owner === squad.owner) continue;
+      if (other.hp <= 0) continue;
+      if (squad.distanceTo(other) <= range) {
+        results.push(other);
       }
     }
     return results;
@@ -151,6 +167,47 @@ export class UnitSystem {
     }
     this.selectedSquads = [];
     EventBus.emit(GameEvents.SELECTION_CLEARED);
+  }
+
+  // ─── Advanced Selection ────────────────────────────────────────────────────
+
+  /** Select squads by their IDs. Deselects all first. */
+  selectSquadsById(ids: string[]): void {
+    this.deselectAll();
+    for (const id of ids) {
+      const squad = this.squads.get(id);
+      if (squad && squad.owner === 0) {
+        squad.select();
+        this.selectedSquads.push(squad);
+      }
+    }
+  }
+
+  /** Select all squads of a given unitType within camera bounds, owned by the given player. */
+  selectAllOfType(unitType: string, cameraBounds: Phaser.Geom.Rectangle, owner: number): void {
+    this.deselectAll();
+    for (const squad of this.squads.values()) {
+      if (squad.owner !== owner) continue;
+      if (squad.stats.type !== unitType) continue;
+
+      const px = squad.getPixelX();
+      const py = squad.getPixelY();
+      if (cameraBounds.contains(px, py)) {
+        squad.select();
+        this.selectedSquads.push(squad);
+      }
+    }
+  }
+
+  /** Get all idle squads for the given owner. */
+  getIdleSquads(owner: number): Squad[] {
+    const results: Squad[] = [];
+    for (const squad of this.squads.values()) {
+      if (squad.owner === owner && squad.state === 'idle') {
+        results.push(squad);
+      }
+    }
+    return results;
   }
 
   // ─── Group Commands ─────────────────────────────────────────────────────────
