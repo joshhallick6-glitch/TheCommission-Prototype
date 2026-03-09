@@ -4,13 +4,10 @@
 
 import Phaser from 'phaser';
 import {
-  TILE_SIZE,
   MAP_WIDTH,
   MAP_HEIGHT,
   WORLD_WIDTH,
   WORLD_HEIGHT,
-  VIEWPORT_WIDTH,
-  VIEWPORT_HEIGHT,
   CAMERA_SCROLL_SPEED,
   CAMERA_EDGE_ZONE,
   CAMERA_ZOOM_MIN,
@@ -95,6 +92,9 @@ export class GameScene extends Phaser.Scene {
   // ── Game Speed (Feature 5) ─────────────────────────────────────────
   private gameSpeed: number = 1.0;
 
+  // ── Win condition guard ──────────────────────────────────────────
+  private gameOver: boolean = false;
+
   constructor() {
     super({ key: 'GameScene' });
   }
@@ -151,6 +151,28 @@ export class GameScene extends Phaser.Scene {
     // ── 8b. Initialize fog of war system ────────────────────────────────
     this.fogOfWarSystem = new FogOfWarSystem(this, 2);
 
+    // Reveal starting neighborhoods so players can see their compounds
+    // and nearby buildings immediately (P1 Start: 0,120,40x40; P2 Start: 120,0,40x40)
+    this.fogOfWarSystem.revealRect(0, 0, 120, 40, 40);   // Player 0 sees P1 Start
+    this.fogOfWarSystem.revealRect(1, 120, 0, 40, 40);   // Player 1 sees P2 Start
+
+    // Also reveal a generous radius around each player's compound for good measure
+    for (let player = 0; player <= 1; player++) {
+      const compound = this.buildingSystem.getCompound(player);
+      if (compound) {
+        const cx = compound.tileX + Math.floor(compound.stats.widthTiles / 2);
+        const cy = compound.tileY + Math.floor(compound.stats.heightTiles / 2);
+        this.fogOfWarSystem.revealArea(player, cx, cy, 15);
+      }
+    }
+
+    // Run an immediate visibility update so the first frame is not fully fogged
+    this.fogOfWarSystem.immediateUpdate(
+      0,
+      Array.from(this.unitSystem.squads.values()),
+      Array.from(this.buildingSystem.buildings.values()),
+    );
+
     // ── 9. Center camera on Player 0's compound ─────────────────────────
     const p0Compound = this.buildingSystem.getCompound(0);
     if (p0Compound) {
@@ -197,6 +219,17 @@ export class GameScene extends Phaser.Scene {
     // ── 12. Set up input handling ───────────────────────────────────────
     this.setupKeyboardInput();
     this.setupMouseInput();
+
+    // ── 12b. Fullscreen toggle (F key) ───────────────────────────────────
+    if (this.input.keyboard) {
+      this.input.keyboard.on('keydown-F', () => {
+        if (this.scale.isFullscreen) {
+          this.scale.stopFullscreen();
+        } else {
+          this.scale.startFullscreen();
+        }
+      });
+    }
 
     // ── 13. Launch UI scene in parallel ─────────────────────────────────
     this.scene.launch('UIScene');
@@ -285,9 +318,8 @@ export class GameScene extends Phaser.Scene {
       RIGHT: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.RIGHT),
     };
 
-    // Action keys
+    // Action keys (stop is on X, not S — S is camera scroll)
     this.actionKeys = {
-      STOP: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.S),
       RETREAT: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.R),
       GARRISON: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.G),
       TIER: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.T),
@@ -741,13 +773,12 @@ export class GameScene extends Phaser.Scene {
       }
 
       if (nearest) {
+        // Move toward the building; garrison state is set but the unit
+        // remains visible until it arrives. The update loop will hide
+        // it once it stops moving and is still in 'garrisoned' state.
         squad.moveTo(nearest.tileX, nearest.tileY);
-        // Garrison will be completed when the unit arrives (handled by future logic)
         squad.state = 'garrisoned';
         nearest.garrison(squad.id);
-        squad.sprite.setVisible(false);
-        squad.healthBar.setVisible(false);
-        squad.selectionCircle.setVisible(false);
       }
     }
   }
@@ -977,8 +1008,18 @@ export class GameScene extends Phaser.Scene {
       );
     }
 
-    // ── 6. Validate captures (check unit proximity) ─────────────────────
+    // ── 6. Hide garrisoned units that have arrived ─────────────────────
+    for (const squad of this.unitSystem.squads.values()) {
+      if (squad.state === 'garrisoned' && !squad.isMoving) {
+        squad.sprite.setVisible(false);
+        squad.healthBar.setVisible(false);
+        squad.selectionCircle.setVisible(false);
+      }
+    }
+
+    // ── 7. Validate and advance captures (check unit proximity) ────────
     this.buildingSystem.validateCaptures(
+      scaledDelta,
       (buildingId: string, playerIndex: number, radiusTiles: number) => {
         const building = this.buildingSystem.buildings.get(buildingId);
         if (!building) return 0;
@@ -1001,10 +1042,13 @@ export class GameScene extends Phaser.Scene {
   // CAMERA SCROLLING
   // ═══════════════════════════════════════════════════════════════════════
 
-  private updateCameraScroll(_delta: number): void {
+  private updateCameraScroll(delta: number): void {
     const cam = this.cameras.main;
     let scrollX = 0;
     let scrollY = 0;
+
+    // Normalize scroll speed to 60fps so it feels consistent across frame rates
+    const dtFactor = delta / 16.67;
 
     // ── Keyboard scrolling (WASD + arrows) ──────────────────────────────
     if (this.cameraKeys) {
@@ -1015,23 +1059,27 @@ export class GameScene extends Phaser.Scene {
     }
 
     // ── Edge scrolling (mouse near screen edge) ─────────────────────────
+    // Skip edge scroll when mouse is over the bottom UI bar (180px tall)
     const pointer = this.input.activePointer;
     if (pointer) {
-      // Use the pointer position relative to the game canvas, not world position
       const px = pointer.x;
       const py = pointer.y;
+      const viewW = this.scale.width;
+      const viewH = this.scale.height;
+      const bottomBarY = viewH - 180;
 
       if (px < CAMERA_EDGE_ZONE) scrollX -= CAMERA_SCROLL_SPEED;
-      if (px > VIEWPORT_WIDTH - CAMERA_EDGE_ZONE) scrollX += CAMERA_SCROLL_SPEED;
+      if (px > viewW - CAMERA_EDGE_ZONE) scrollX += CAMERA_SCROLL_SPEED;
       if (py < CAMERA_EDGE_ZONE) scrollY -= CAMERA_SCROLL_SPEED;
-      if (py > VIEWPORT_HEIGHT - CAMERA_EDGE_ZONE) scrollY += CAMERA_SCROLL_SPEED;
+      // Only scroll down at bottom edge if mouse is ABOVE the bottom bar
+      if (py > viewH - CAMERA_EDGE_ZONE && py < bottomBarY) scrollY += CAMERA_SCROLL_SPEED;
     }
 
-    // Apply scroll (scaled by zoom so speed feels consistent)
+    // Apply scroll (scaled by zoom and delta so speed feels consistent)
     if (scrollX !== 0 || scrollY !== 0) {
       const zoomFactor = 1 / cam.zoom;
-      cam.scrollX += scrollX * zoomFactor;
-      cam.scrollY += scrollY * zoomFactor;
+      cam.scrollX += scrollX * zoomFactor * dtFactor;
+      cam.scrollY += scrollY * zoomFactor * dtFactor;
     }
   }
 
@@ -1040,13 +1088,16 @@ export class GameScene extends Phaser.Scene {
   // ═══════════════════════════════════════════════════════════════════════
 
   private checkWinConditions(): void {
-    // Check if all enemy buildings are destroyed/captured
+    if (this.gameOver) return;
+
     const p1Buildings = this.buildingSystem.getBuildingsByOwner(1);
     const p0Buildings = this.buildingSystem.getBuildingsByOwner(0);
 
     if (p1Buildings.length === 0 && this.buildingSystem.buildings.size > 0) {
+      this.gameOver = true;
       EventBus.emit(GameEvents.GAME_OVER, { winner: 0, reason: 'All enemy buildings captured or destroyed' });
     } else if (p0Buildings.length === 0 && this.buildingSystem.buildings.size > 0) {
+      this.gameOver = true;
       EventBus.emit(GameEvents.GAME_OVER, { winner: 1, reason: 'All player buildings captured or destroyed' });
     }
   }

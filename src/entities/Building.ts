@@ -343,11 +343,8 @@ export class Building {
 
   // ─── Update Loop ─────────────────────────────────────────────────────────────
 
-  /** Called each frame. Advances capture, production, and refreshes visuals as needed. */
+  /** Called each frame. Advances production (capture is driven by BuildingSystem.validateCaptures). */
   update(delta: number): void {
-    if (this.isBeingCaptured) {
-      this.updateCapture(delta);
-    }
     this.updateProduction(delta);
   }
 

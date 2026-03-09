@@ -3,7 +3,6 @@
 // game — clicking START GAME transitions to the LobbyScene.
 
 import Phaser from 'phaser';
-import { VIEWPORT_WIDTH, VIEWPORT_HEIGHT } from '../data/config';
 
 /** Number of rain lines to animate on the title screen. */
 const RAIN_LINE_COUNT = 30;
@@ -24,6 +23,11 @@ export class MenuScene extends Phaser.Scene {
     super({ key: 'MenuScene' });
   }
 
+  /** Current viewport width from the scale manager. */
+  private get viewW(): number { return this.scale.width; }
+  /** Current viewport height from the scale manager. */
+  private get viewH(): number { return this.scale.height; }
+
   create(): void {
     // Solid dark background
     this.cameras.main.setBackgroundColor('#0a0a0a');
@@ -40,7 +44,7 @@ export class MenuScene extends Phaser.Scene {
 
     // ── Title text ────────────────────────────────────────────────────────
     this.add
-      .text(VIEWPORT_WIDTH / 2, VIEWPORT_HEIGHT * 0.3, 'THE COMMISSION', {
+      .text(this.viewW / 2, this.viewH * 0.3, 'THE COMMISSION', {
         fontFamily: 'Georgia, "Times New Roman", serif',
         fontSize: '72px',
         color: '#DAA520',
@@ -51,8 +55,8 @@ export class MenuScene extends Phaser.Scene {
     // ── Subtitle ──────────────────────────────────────────────────────────
     this.add
       .text(
-        VIEWPORT_WIDTH / 2,
-        VIEWPORT_HEIGHT * 0.3 + 60,
+        this.viewW / 2,
+        this.viewH * 0.3 + 60,
         'A Prohibition-Era Crime Empire',
         {
           fontFamily: 'Georgia, "Times New Roman", serif',
@@ -66,14 +70,43 @@ export class MenuScene extends Phaser.Scene {
     // ── START GAME button ─────────────────────────────────────────────────
     this.createStartButton();
 
+    // ── Fullscreen hint ───────────────────────────────────────────────────
+    this.add
+      .text(this.viewW / 2, this.viewH * 0.6 + 50, 'Press F for fullscreen', {
+        fontFamily: 'Arial, sans-serif',
+        fontSize: '14px',
+        color: '#555555',
+        align: 'center',
+      })
+      .setOrigin(0.5)
+      .setDepth(2);
+
     // ── Version label ─────────────────────────────────────────────────────
     this.add
-      .text(VIEWPORT_WIDTH - 16, VIEWPORT_HEIGHT - 16, 'v0.2', {
+      .text(this.viewW - 16, this.viewH - 16, 'v0.2', {
         fontFamily: 'monospace',
         fontSize: '14px',
         color: '#555555',
       })
       .setOrigin(1, 1);
+
+    // ── Fullscreen toggle (F key) ─────────────────────────────────────────
+    if (this.input.keyboard) {
+      this.input.keyboard.on('keydown-F', () => {
+        if (this.scale.isFullscreen) {
+          this.scale.stopFullscreen();
+        } else {
+          this.scale.startFullscreen();
+        }
+      });
+    }
+
+    // ── Handle resize: recreate the scene to reposition everything ────────
+    // Use `once` to avoid accumulating listeners across restarts. Each restart
+    // registers a fresh one-shot listener, so there is never more than one.
+    this.scale.once('resize', () => {
+      this.scene.restart();
+    });
   }
 
   update(): void {
@@ -85,9 +118,9 @@ export class MenuScene extends Phaser.Scene {
   /** Create a single rain line with randomized properties. */
   private spawnRainLine(randomizeY: boolean): RainLine {
     return {
-      x: Phaser.Math.Between(0, VIEWPORT_WIDTH),
+      x: Phaser.Math.Between(0, this.viewW),
       y: randomizeY
-        ? Phaser.Math.Between(-VIEWPORT_HEIGHT, VIEWPORT_HEIGHT)
+        ? Phaser.Math.Between(-this.viewH, this.viewH)
         : Phaser.Math.Between(-60, -10),
       length: Phaser.Math.Between(10, 30),
       speed: Phaser.Math.FloatBetween(3, 7),
@@ -99,11 +132,14 @@ export class MenuScene extends Phaser.Scene {
     this.rainGfx.clear();
     this.rainGfx.lineStyle(1, 0x444444, 0.3);
 
+    const w = this.viewW;
+    const h = this.viewH;
+
     for (const line of this.rainLines) {
       line.y += line.speed;
 
       // Reset when off-screen
-      if (line.y > VIEWPORT_HEIGHT + line.length) {
+      if (line.y > h + line.length) {
         const fresh = this.spawnRainLine(false);
         line.x = fresh.x;
         line.y = fresh.y;
@@ -122,25 +158,11 @@ export class MenuScene extends Phaser.Scene {
 
   /** Draw a dark radial vignette around the screen edges. */
   private createVignette(): void {
+    const w = this.viewW;
+    const h = this.viewH;
+
     const vignetteGfx = this.add.graphics();
-    const cx = VIEWPORT_WIDTH / 2;
-    const cy = VIEWPORT_HEIGHT / 2;
-    const outerRadius = Math.max(VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
 
-    // Layer concentric semi-transparent black rings
-    const steps = 8;
-    for (let i = steps; i >= 1; i--) {
-      const alpha = (i / steps) * 0.5;
-      const radius = outerRadius * (i / steps);
-      vignetteGfx.fillStyle(0x000000, alpha);
-      vignetteGfx.fillRect(0, 0, VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
-      // Punch out a clear ellipse in the center
-      vignetteGfx.fillStyle(0x0a0a0a, 1);
-      vignetteGfx.fillEllipse(cx, cy, radius * 1.2, radius * 0.8);
-    }
-
-    // Simpler approach: just darken the edges with four gradient-like rects
-    vignetteGfx.clear();
     const edgeSize = 120;
     const edgeAlpha = 0.4;
 
@@ -148,25 +170,25 @@ export class MenuScene extends Phaser.Scene {
     for (let i = 0; i < edgeSize; i++) {
       const a = edgeAlpha * (1 - i / edgeSize);
       vignetteGfx.fillStyle(0x000000, a);
-      vignetteGfx.fillRect(0, i, VIEWPORT_WIDTH, 1);
+      vignetteGfx.fillRect(0, i, w, 1);
     }
     // Bottom edge
     for (let i = 0; i < edgeSize; i++) {
       const a = edgeAlpha * (1 - i / edgeSize);
       vignetteGfx.fillStyle(0x000000, a);
-      vignetteGfx.fillRect(0, VIEWPORT_HEIGHT - 1 - i, VIEWPORT_WIDTH, 1);
+      vignetteGfx.fillRect(0, h - 1 - i, w, 1);
     }
     // Left edge
     for (let i = 0; i < edgeSize; i++) {
       const a = edgeAlpha * (1 - i / edgeSize);
       vignetteGfx.fillStyle(0x000000, a);
-      vignetteGfx.fillRect(i, 0, 1, VIEWPORT_HEIGHT);
+      vignetteGfx.fillRect(i, 0, 1, h);
     }
     // Right edge
     for (let i = 0; i < edgeSize; i++) {
       const a = edgeAlpha * (1 - i / edgeSize);
       vignetteGfx.fillStyle(0x000000, a);
-      vignetteGfx.fillRect(VIEWPORT_WIDTH - 1 - i, 0, 1, VIEWPORT_HEIGHT);
+      vignetteGfx.fillRect(w - 1 - i, 0, 1, h);
     }
 
     vignetteGfx.setDepth(1);
@@ -174,8 +196,8 @@ export class MenuScene extends Phaser.Scene {
 
   /** Create the START GAME button with hover effects. */
   private createStartButton(): void {
-    const btnX = VIEWPORT_WIDTH / 2;
-    const btnY = VIEWPORT_HEIGHT * 0.6;
+    const btnX = this.viewW / 2;
+    const btnY = this.viewH * 0.6;
     const btnW = 240;
     const btnH = 50;
 

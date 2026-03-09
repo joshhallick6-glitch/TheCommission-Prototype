@@ -7,10 +7,13 @@
 import Phaser from 'phaser';
 import {
   TILE_SIZE,
+  TILE_WIDTH,
+  TILE_HEIGHT,
   STREET_CORNER_RADIUS,
   PLAYER_COLORS,
 } from '../data/config';
 import { EventBus, GameEvents } from '../utils/EventBus';
+import { tileToWorld } from '../utils/IsometricUtils';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -229,16 +232,18 @@ export class TerritorySystem {
       const gfx = corner.marker;
       gfx.clear();
 
-      const worldX = corner.tileX * TILE_SIZE + TILE_SIZE / 2;
-      const worldY = corner.tileY * TILE_SIZE + TILE_SIZE / 2;
+      const worldPos = tileToWorld(corner.tileX, corner.tileY);
+      const worldX = worldPos.x;
+      const worldY = worldPos.y;
 
-      // ── Control zone circle (very faint) ──────────────────────────
-      const zoneRadius = corner.radius * TILE_SIZE;
+      // ── Control zone ellipse (isometric, very faint) ──────────────
+      const zoneWidth = corner.radius * TILE_WIDTH * 2;
+      const zoneHeight = corner.radius * TILE_HEIGHT * 2;
       const zoneColor = this.getOwnerColor(corner.owner);
       gfx.lineStyle(1, zoneColor, 0.15);
-      gfx.strokeCircle(worldX, worldY, zoneRadius);
+      gfx.strokeEllipse(worldX, worldY, zoneWidth, zoneHeight);
       gfx.fillStyle(zoneColor, ZONE_ALPHA);
-      gfx.fillCircle(worldX, worldY, zoneRadius);
+      gfx.fillEllipse(worldX, worldY, zoneWidth, zoneHeight);
 
       // ── Diamond marker (rotated square) ───────────────────────────
       const half = CORNER_MARKER_SIZE / 2;

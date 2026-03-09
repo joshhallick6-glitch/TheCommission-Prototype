@@ -1,10 +1,9 @@
 // ─── Lobby Scene ────────────────────────────────────────────────────────────
 // Family selection screen. Players pick one of four mafia families before
 // starting a match. Selection is stored in the registry and forwarded to
-// BootScene → GameScene.
+// BootScene -> GameScene.
 
 import Phaser from 'phaser';
-import { VIEWPORT_WIDTH, VIEWPORT_HEIGHT } from '../data/config';
 import { FAMILIES, FamilyData } from '../data/families';
 
 /** Layout constants for family panels. */
@@ -30,6 +29,11 @@ export class LobbyScene extends Phaser.Scene {
     super({ key: 'LobbyScene' });
   }
 
+  /** Current viewport width from the scale manager. */
+  private get viewW(): number { return this.scale.width; }
+  /** Current viewport height from the scale manager. */
+  private get viewH(): number { return this.scale.height; }
+
   create(): void {
     this.selectedIndex = -1;
     this.panelGraphics = [];
@@ -39,7 +43,7 @@ export class LobbyScene extends Phaser.Scene {
 
     // ── Title ─────────────────────────────────────────────────────────────
     this.add
-      .text(VIEWPORT_WIDTH / 2, 50, 'CHOOSE YOUR FAMILY', {
+      .text(this.viewW / 2, 50, 'CHOOSE YOUR FAMILY', {
         fontFamily: 'Georgia, "Times New Roman", serif',
         fontSize: '36px',
         color: '#DAA520',
@@ -50,7 +54,7 @@ export class LobbyScene extends Phaser.Scene {
     // ── Family panels ─────────────────────────────────────────────────────
     const totalWidth =
       FAMILIES.length * PANEL_WIDTH + (FAMILIES.length - 1) * PANEL_GAP;
-    const startX = (VIEWPORT_WIDTH - totalWidth) / 2;
+    const startX = (this.viewW - totalWidth) / 2;
 
     for (let i = 0; i < FAMILIES.length; i++) {
       const family = FAMILIES[i];
@@ -60,6 +64,13 @@ export class LobbyScene extends Phaser.Scene {
 
     // ── START MATCH button ────────────────────────────────────────────────
     this.createStartMatchButton();
+
+    // ── Handle resize: recreate the scene to reposition everything ────────
+    // Use `once` to avoid accumulating listeners across restarts. Each restart
+    // registers a fresh one-shot listener, so there is never more than one.
+    this.scale.once('resize', () => {
+      this.scene.restart();
+    });
   }
 
   // ── Panel creation ──────────────────────────────────────────────────────
@@ -178,7 +189,7 @@ export class LobbyScene extends Phaser.Scene {
     // Redraw all panels: highlight selected, dim others
     const totalWidth =
       FAMILIES.length * PANEL_WIDTH + (FAMILIES.length - 1) * PANEL_GAP;
-    const startX = (VIEWPORT_WIDTH - totalWidth) / 2;
+    const startX = (this.viewW - totalWidth) / 2;
 
     for (let i = 0; i < FAMILIES.length; i++) {
       const px = startX + i * (PANEL_WIDTH + PANEL_GAP);
@@ -199,11 +210,11 @@ export class LobbyScene extends Phaser.Scene {
     this.updateStartButton(true);
   }
 
-  // ── START MATCH button ────────────────────────────────────────────────
+  // ── START MATCH button ──────────────────────────────────────────────────
 
   private createStartMatchButton(): void {
-    const btnX = VIEWPORT_WIDTH / 2;
-    const btnY = VIEWPORT_HEIGHT - 70;
+    const btnX = this.viewW / 2;
+    const btnY = this.viewH - 70;
     const btnW = 200;
     const btnH = 45;
 
@@ -247,8 +258,8 @@ export class LobbyScene extends Phaser.Scene {
 
   /** Draw the start button in enabled or disabled state. */
   private drawStartButton(enabled: boolean, hover: boolean = false): void {
-    const btnX = VIEWPORT_WIDTH / 2;
-    const btnY = VIEWPORT_HEIGHT - 70;
+    const btnX = this.viewW / 2;
+    const btnY = this.viewH - 70;
     const btnW = 200;
     const btnH = 45;
 

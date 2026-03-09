@@ -176,7 +176,10 @@ export class MapSystem {
       return tilemap;
     }
 
-    const layer = tilemap.createLayer(0, tileset, 0, 0);
+    // Position the layer so Phaser's isometric tile rendering aligns with
+    // our tileToWorld() coordinate system (which adds MAP_HEIGHT * TILE_WIDTH/2
+    // as an x-offset to center the diamond in world space).
+    const layer = tilemap.createLayer(0, tileset, MAP_HEIGHT * TILE_WIDTH / 2, 0);
 
     if (layer) {
       // Apply neighborhood tints to road and sidewalk tiles
@@ -276,7 +279,9 @@ export class MapSystem {
       this.rng.shuffle(intersections);
 
       let placed = 0;
-      const maxBuildings = hood.name.startsWith('P') && owner >= 0 ? 4 : this.rng.int(3, 7);
+      // Dense urban feel: many buildings per neighborhood.
+      // Player starts get 8 (compound + 7 others), neutral neighborhoods get 10-15.
+      const maxBuildings = hood.name.startsWith('P') && owner >= 0 ? 8 : this.rng.int(10, 16);
 
       // Player start gets a Compound first
       if (owner >= 0) {
@@ -335,17 +340,19 @@ export class MapSystem {
         }
       }
 
-      // Fill remaining slots with random neutral buildings
+      // Fill remaining slots with random neutral buildings.
+      // Cycle through the pool repeatedly so we can place many buildings
+      // without being capped by the pool size.
       const shuffledPool = [...neutralPool];
       this.rng.shuffle(shuffledPool);
       let poolIdx = 0;
 
-      while (placed < maxBuildings && intersections.length > 0 && poolIdx < shuffledPool.length) {
+      while (placed < maxBuildings && intersections.length > 0) {
         const bType = shuffledPool[poolIdx % shuffledPool.length];
         poolIdx++;
         const def = BUILDING_DEFS[bType];
         const pt = intersections.pop()!;
-        const spot = this.findClearSpot(pt.x, pt.y, def.widthTiles, def.heightTiles, 4);
+        const spot = this.findClearSpot(pt.x, pt.y, def.widthTiles, def.heightTiles, 6);
         if (spot) {
           placements.push({
             type: bType,

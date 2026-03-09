@@ -181,7 +181,12 @@ export class BuildingSystem {
    *   belonging to `playerIndex` within `radius` tiles of the building.
    *   The building system doesn't own unit data, so this is injected.
    */
+  /**
+   * Validate and advance captures. Building.update() no longer advances capture;
+   * this method is the sole driver, using the real squad count for speed scaling.
+   */
   validateCaptures(
+    delta: number,
     getSquadCountNear: (
       buildingId: string,
       playerIndex: number,
@@ -200,22 +205,9 @@ export class BuildingSystem {
       );
 
       if (nearbySquads <= 0) {
-        // No units nearby -- cancel the capture
         building.cancelCapture();
       } else {
-        // Update capture with the real squad count for speed scaling
-        // (building.update already ran this frame with default squadCount=1,
-        //  so we call updateCapture again with the correct count minus the
-        //  default pass. However, to keep things clean, we skip the default
-        //  call and handle it entirely here.)
-        //
-        // NOTE: To avoid double-advancing, the recommended pattern is:
-        //   1. Call buildingSystem.update(delta) for non-capture updates
-        //   2. Call buildingSystem.validateCaptures(...) with the real counts
-        //
-        // For now Building.update() also advances capture, so the consumer
-        // should call validateCaptures() OR rely on building.update() -- not
-        // both. A future refactor can separate these concerns.
+        building.updateCapture(delta, nearbySquads);
       }
     }
   }

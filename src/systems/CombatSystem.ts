@@ -15,6 +15,7 @@ import {
   VETERANCY_BONUS,
 } from '../data/config';
 import { EventBus, GameEvents } from '../utils/EventBus';
+import { tileToWorld } from '../utils/IsometricUtils';
 
 export class CombatSystem {
   scene: Phaser.Scene;
@@ -133,10 +134,12 @@ export class CombatSystem {
         }
 
         // Visual effects
-        const fromX = attacker.tileX * TILE_SIZE + TILE_SIZE / 2;
-        const fromY = attacker.tileY * TILE_SIZE + TILE_SIZE / 2;
-        const toX = target.tileX * TILE_SIZE + TILE_SIZE / 2;
-        const toY = target.tileY * TILE_SIZE + TILE_SIZE / 2;
+        const fromPos = tileToWorld(attacker.tileX, attacker.tileY);
+        const fromX = fromPos.x;
+        const fromY = fromPos.y;
+        const toPos = tileToWorld(target.tileX, target.tileY);
+        const toX = toPos.x;
+        const toY = toPos.y;
 
         this.createCombatEffect(this.scene, fromX, fromY, toX, toY);
         this.flashTarget(target);
@@ -157,8 +160,7 @@ export class CombatSystem {
           this.awardVeterancy(attacker);
           this.disengageAll(targetId);
 
-          // Emit the actual squad object so UnitSystem can call squad.id
-          EventBus.emit(GameEvents.SQUAD_WIPED, target);
+          // Squad.die() already emits SQUAD_WIPED — only emit UNIT_KILLED here
           EventBus.emit(GameEvents.UNIT_KILLED, targetId, attackerId);
 
           // Small screen-shake for nearby wipes

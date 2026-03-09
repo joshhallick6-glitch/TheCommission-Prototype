@@ -4,9 +4,6 @@
 
 import Phaser from 'phaser';
 import {
-  VIEWPORT_WIDTH,
-  VIEWPORT_HEIGHT,
-  TILE_SIZE,
   MAP_WIDTH,
   MAP_HEIGHT,
   PLAYER_COLORS,
@@ -17,6 +14,7 @@ import {
 } from '../data/config';
 import { UnitType, UNIT_DEFS } from '../data/units';
 import { EventBus, GameEvents } from '../utils/EventBus';
+import { tileToWorld, worldToTile } from '../utils/IsometricUtils';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -35,15 +33,9 @@ const RESOURCE_BAR_HEIGHT = 40;
 
 // Bottom bar dimensions (AoE2-style unified bottom panel)
 const BOTTOM_BAR_HEIGHT = 180;
-const BOTTOM_BAR_Y = VIEWPORT_HEIGHT - BOTTOM_BAR_HEIGHT;
 
-// Info panel (center of bottom bar, between minimap and command panel)
-const INFO_PANEL_X = MINIMAP_SIZE + 20;
-const INFO_PANEL_WIDTH = VIEWPORT_WIDTH - MINIMAP_SIZE - 320 - 30; // ~530px
-
-// Command panel (right side of bottom bar)
+// Command panel width (fixed)
 const COMMAND_PANEL_WIDTH = 310;
-const COMMAND_PANEL_X = VIEWPORT_WIDTH - COMMAND_PANEL_WIDTH - 5;
 
 // Unit grid (multi-select)
 const GRID_ICON_SIZE = 36;
@@ -106,7 +98,7 @@ export class UIScene extends Phaser.Scene {
 
   // Minimap position & size (inside the unified bottom bar)
   private minimapX: number = 5;
-  private minimapY: number = VIEWPORT_HEIGHT - BOTTOM_BAR_HEIGHT + (BOTTOM_BAR_HEIGHT - MINIMAP_SIZE) / 2 + 2;
+  private minimapY: number = 0; // Set dynamically in create/resize
 
   // ── Bottom bar (unified AoE2-style) ──────────────────────────────────
   private bottomBarBg!: Phaser.GameObjects.Rectangle;
@@ -160,12 +152,30 @@ export class UIScene extends Phaser.Scene {
   // CREATE
   // ═══════════════════════════════════════════════════════════════════════
 
+  // ── Dynamic layout helpers (depend on current viewport size) ─────────
+
+  /** Current viewport width from the scale manager. */
+  private get viewW(): number { return this.scale.width; }
+  /** Current viewport height from the scale manager. */
+  private get viewH(): number { return this.scale.height; }
+  /** Y coordinate where the bottom bar starts. */
+  private get bottomBarY(): number { return this.viewH - BOTTOM_BAR_HEIGHT; }
+  /** X coordinate of the info panel (center of bottom bar). */
+  private get infoPanelX(): number { return MINIMAP_SIZE + 20; }
+  /** Width of the info panel (fills space between minimap and command panel). */
+  private get infoPanelWidth(): number { return this.viewW - MINIMAP_SIZE - COMMAND_PANEL_WIDTH - 30; }
+  /** X coordinate of the command panel (right side of bottom bar). */
+  private get commandPanelX(): number { return this.viewW - COMMAND_PANEL_WIDTH - 5; }
+
   create(): void {
     // Get reference to the game scene
     this.gameScene = this.scene.get('GameScene');
 
     // Fixed camera -- does not scroll with the game world
     this.cameras.main.setScroll(0, 0);
+
+    // Compute initial minimap Y position
+    this.minimapY = this.bottomBarY + (BOTTOM_BAR_HEIGHT - MINIMAP_SIZE) / 2 + 2;
 
     // Build all UI panels
     this.createResourceBar();
@@ -179,6 +189,79 @@ export class UIScene extends Phaser.Scene {
 
     // Register event listeners
     this.registerEventListeners();
+
+    // ── Resize handler: reposition all UI elements when the window resizes ──
+    this.scale.on('resize', (gameSize: Phaser.Structs.Size) => {
+      this.handleResize(gameSize.width, gameSize.height);
+    });
+  }
+
+  /**
+   * Reposition all UI elements for the new viewport dimensions.
+   * Called whenever the browser window is resized or fullscreen is toggled.
+   */
+  private handleResize(width: number, height: number): void {
+    // Keep the fixed camera at origin
+    this.cameras.main.setScroll(0, 0);
+
+    // Recompute minimap Y
+    this.minimapY = this.bottomBarY + (BOTTOM_BAR_HEIGHT - MINIMAP_SIZE) / 2 + 2;
+
+    // ── Resource bar (top of screen, full width) ──────────────────────────
+    this.resourceBarBg.setPosition(width / 2, RESOURCE_BAR_HEIGHT / 2);
+    this.resourceBarBg.setSize(width, RESOURCE_BAR_HEIGHT);
+
+    const textY = RESOURCE_BAR_HEIGHT / 2;
+    this.incomeRateText.setPosition(width / 2, textY);
+    this.tierText.setPosition(width - 250, textY);
+    this.tierButton.setPosition(width - 60, textY);
+    this.tierButtonLabel.setPosition(width - 60, textY);
+
+    // ── Bottom bar (full width, anchored to bottom) ──────────────────────
+    this.bottomBarBg.setPosition(width / 2, this.bottomBarY + BOTTOM_BAR_HEIGHT / 2);
+    this.bottomBarBg.setSize(width, BOTTOM_BAR_HEIGHT);
+
+    // Redraw bottom bar border lines
+    this.bottomBarBorder.clear();
+    this.bottomBarBorder.lineStyle(2, 0x8B7355, 0.8);
+    this.bottomBarBorder.lineBetween(0, this.bottomBarY, width, this.bottomBarY);
+    this.bottomBarBorder.lineStyle(1, 0x444444, 0.4);
+    this.bottomBarBorder.lineBetween(0, this.bottomBarY + 2, width, this.bottomBarY + 2);
+    this.bottomBarBorder.lineStyle(1, 0x555555, 0.6);
+    this.bottomBarBorder.lineBetween(
+      MINIMAP_SIZE + 15, this.bottomBarY + 5,
+      MINIMAP_SIZE + 15, height - 5,
+    );
+    this.bottomBarBorder.lineBetween(
+      this.commandPanelX - 5, this.bottomBarY + 5,
+      this.commandPanelX - 5, height - 5,
+    );
+
+    // ── Minimap (bottom-left inside bottom bar) ──────────────────────────
+    this.minimapBg.setPosition(this.minimapX + MINIMAP_SIZE / 2, this.minimapY + MINIMAP_SIZE / 2);
+    this.minimapBorder.setPosition(this.minimapX + MINIMAP_SIZE / 2, this.minimapY + MINIMAP_SIZE / 2);
+    this.minimapTexture.setPosition(this.minimapX, this.minimapY);
+
+    // ── Timer and speed display (top bar area) ───────────────────────────
+    this.timerText.setPosition(width / 2 + 180, textY);
+    this.gameSpeedText.setPosition(width / 2 + 240, textY);
+
+    // ── Pause overlay (center of screen) ─────────────────────────────────
+    this.pauseOverlay.setPosition(width / 2, height / 2);
+
+    // ── Alerts (top-right) ────────────────────────────────────────────────
+    // Alerts are ephemeral and will be created at the new positions naturally.
+    // We reposition any existing alerts.
+    const alertX = width - 300;
+    for (const alert of this.alerts) {
+      alert.background.x = alertX + 130;
+      alert.text.x = alertX + 10;
+    }
+
+    // ── Refresh selection panel and action bar for new layout ─────────────
+    this.updateSelectionPanel();
+    this.updateActionBar();
+    this.updateProductionQueueUI();
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -188,9 +271,9 @@ export class UIScene extends Phaser.Scene {
   private createResourceBar(): void {
     // Background
     this.resourceBarBg = this.add.rectangle(
-      VIEWPORT_WIDTH / 2,
+      this.viewW / 2,
       RESOURCE_BAR_HEIGHT / 2,
-      VIEWPORT_WIDTH,
+      this.viewW,
       RESOURCE_BAR_HEIGHT,
       PANEL_BG_COLOR,
       PANEL_BG_ALPHA,
@@ -229,7 +312,7 @@ export class UIScene extends Phaser.Scene {
     this.influenceText.setDepth(UI_DEPTH + 1);
 
     // ── Center section: Income rates ────────────────────────────────────
-    this.incomeRateText = this.add.text(VIEWPORT_WIDTH / 2, textY, '+$0/min  +0g/min  +0i/min', {
+    this.incomeRateText = this.add.text(this.viewW / 2, textY, '+$0/min  +0g/min  +0i/min', {
       fontSize: '13px',
       fontFamily: FONT_FAMILY,
       color: '#AAAAAA',
@@ -238,7 +321,7 @@ export class UIScene extends Phaser.Scene {
     this.incomeRateText.setDepth(UI_DEPTH + 1);
 
     // ── Right section: Tier info and button ──────────────────────────────
-    this.tierText = this.add.text(VIEWPORT_WIDTH - 250, textY, 'TIER 1: Street Crew', {
+    this.tierText = this.add.text(this.viewW - 250, textY, 'TIER 1: Street Crew', {
       fontSize: '14px',
       fontFamily: FONT_FAMILY,
       color: '#FFFFFF',
@@ -249,7 +332,7 @@ export class UIScene extends Phaser.Scene {
 
     // Tier-up button
     this.tierButton = this.add.rectangle(
-      VIEWPORT_WIDTH - 60,
+      this.viewW - 60,
       textY,
       100,
       28,
@@ -260,7 +343,7 @@ export class UIScene extends Phaser.Scene {
     this.tierButton.setInteractive({ useHandCursor: true });
     this.tierButton.on('pointerdown', () => this.onTierUpClicked());
 
-    this.tierButtonLabel = this.add.text(VIEWPORT_WIDTH - 60, textY, 'TIER UP', {
+    this.tierButtonLabel = this.add.text(this.viewW - 60, textY, 'TIER UP', {
       fontSize: '12px',
       fontFamily: FONT_FAMILY,
       color: '#FFFFFF',
@@ -310,9 +393,9 @@ export class UIScene extends Phaser.Scene {
   private createBottomBar(): void {
     // Full-width dark background for the bottom panel
     this.bottomBarBg = this.add.rectangle(
-      VIEWPORT_WIDTH / 2,
-      BOTTOM_BAR_Y + BOTTOM_BAR_HEIGHT / 2,
-      VIEWPORT_WIDTH,
+      this.viewW / 2,
+      this.bottomBarY + BOTTOM_BAR_HEIGHT / 2,
+      this.viewW,
       BOTTOM_BAR_HEIGHT,
       0x0d0d0d,
       0.92,
@@ -323,22 +406,22 @@ export class UIScene extends Phaser.Scene {
     this.bottomBarBorder = this.add.graphics();
     this.bottomBarBorder.setDepth(UI_DEPTH + 3);
     this.bottomBarBorder.lineStyle(2, 0x8B7355, 0.8);
-    this.bottomBarBorder.lineBetween(0, BOTTOM_BAR_Y, VIEWPORT_WIDTH, BOTTOM_BAR_Y);
+    this.bottomBarBorder.lineBetween(0, this.bottomBarY, this.viewW, this.bottomBarY);
     // Subtle inner line
     this.bottomBarBorder.lineStyle(1, 0x444444, 0.4);
-    this.bottomBarBorder.lineBetween(0, BOTTOM_BAR_Y + 2, VIEWPORT_WIDTH, BOTTOM_BAR_Y + 2);
+    this.bottomBarBorder.lineBetween(0, this.bottomBarY + 2, this.viewW, this.bottomBarY + 2);
 
     // Vertical divider after minimap
     this.bottomBarBorder.lineStyle(1, 0x555555, 0.6);
     this.bottomBarBorder.lineBetween(
-      MINIMAP_SIZE + 15, BOTTOM_BAR_Y + 5,
-      MINIMAP_SIZE + 15, VIEWPORT_HEIGHT - 5,
+      MINIMAP_SIZE + 15, this.bottomBarY + 5,
+      MINIMAP_SIZE + 15, this.viewH - 5,
     );
 
     // Vertical divider before command panel
     this.bottomBarBorder.lineBetween(
-      COMMAND_PANEL_X - 5, BOTTOM_BAR_Y + 5,
-      COMMAND_PANEL_X - 5, VIEWPORT_HEIGHT - 5,
+      this.commandPanelX - 5, this.bottomBarY + 5,
+      this.commandPanelX - 5, this.viewH - 5,
     );
   }
 
@@ -390,6 +473,42 @@ export class UIScene extends Phaser.Scene {
     });
   }
 
+  // ── Isometric minimap projection helpers ─────────────────────────────
+  // Maps tile coords (tx, ty) into minimap pixel coords.
+  // The diamond top is at (MAP_WIDTH/2, 0), right at (MAP_WIDTH, MAP_HEIGHT/2),
+  // bottom at (MAP_WIDTH/2, MAP_HEIGHT), left at (0, MAP_HEIGHT/2).
+  // We scale so the full diamond fits inside the MINIMAP_SIZE square.
+
+  private tileToMinimap(tx: number, ty: number): { mx: number; my: number } {
+    // Isometric projection: rotate tile grid 45 degrees
+    const isoX = (tx - ty);          // range: -MAP_HEIGHT .. +MAP_WIDTH
+    const isoY = (tx + ty);          // range: 0 .. MAP_WIDTH+MAP_HEIGHT
+
+    // Scale to fit within MINIMAP_SIZE pixels
+    // isoX range = MAP_WIDTH + MAP_HEIGHT (total span), center at 0
+    // isoY range = MAP_WIDTH + MAP_HEIGHT (total span), starts at 0
+    const span = MAP_WIDTH + MAP_HEIGHT; // 320 for 160x160
+
+    const mx = (isoX / span) * MINIMAP_SIZE + MINIMAP_SIZE / 2;
+    const my = (isoY / span) * MINIMAP_SIZE;
+
+    return { mx, my };
+  }
+
+  private minimapToTile(mx: number, my: number): { tx: number; ty: number } {
+    // Reverse the isometric projection
+    const span = MAP_WIDTH + MAP_HEIGHT;
+
+    const isoX = ((mx - MINIMAP_SIZE / 2) / MINIMAP_SIZE) * span;
+    const isoY = (my / MINIMAP_SIZE) * span;
+
+    // isoX = tx - ty, isoY = tx + ty  =>  tx = (isoX + isoY) / 2, ty = (isoY - isoX) / 2
+    const tx = (isoX + isoY) / 2;
+    const ty = (isoY - isoX) / 2;
+
+    return { tx, ty };
+  }
+
   private updateMinimap(time: number): void {
     // Only update periodically to save performance
     if (time - this.minimapLastUpdate < MINIMAP_UPDATE_INTERVAL) {
@@ -398,26 +517,30 @@ export class UIScene extends Phaser.Scene {
     }
     this.minimapLastUpdate = time;
 
-    // Scale factor: map tiles to minimap pixels
-    const scaleX = MINIMAP_SIZE / MAP_WIDTH;
-    const scaleY = MINIMAP_SIZE / MAP_HEIGHT;
-
     // Clear and redraw
     this.minimapTexture.clear();
 
     // Draw terrain using a temporary graphics object
     const gfx = this.make.graphics({ x: 0, y: 0 }, false);
 
-    // Draw a simplified terrain view
+    // Draw a simplified terrain view (isometric diamond projection)
     // Sample every few tiles for performance
-    const step = Math.max(1, Math.floor(MAP_WIDTH / MINIMAP_SIZE));
+    const step = Math.max(1, Math.floor(MAP_WIDTH / (MINIMAP_SIZE / 2)));
 
     const gameScene = this.gameScene as any;
     const mapSystem = gameScene?.mapSystem;
 
+    // Get fog of war visibility grid for current player (player 0)
+    const fogSystem = gameScene?.fogOfWarSystem;
+    const fogGrid: Uint8Array | null = fogSystem?.visibility?.[0] ?? null;
+
     if (mapSystem) {
       for (let ty = 0; ty < MAP_HEIGHT; ty += step) {
         for (let tx = 0; tx < MAP_WIDTH; tx += step) {
+          // Respect fog of war: skip unexplored tiles entirely
+          const vis = fogGrid ? fogGrid[ty * MAP_WIDTH + tx] : 2;
+          if (vis === 0) continue; // Unexplored — black/hidden
+
           const terrain = mapSystem.getTerrain(tx, ty);
           let color = 0x222222;
 
@@ -451,21 +574,28 @@ export class UIScene extends Phaser.Scene {
               break;
           }
 
-          const px = Math.floor(tx * scaleX);
-          const py = Math.floor(ty * scaleY);
-          const pw = Math.max(1, Math.ceil(step * scaleX));
-          const ph = Math.max(1, Math.ceil(step * scaleY));
+          // Dim explored (but not currently visible) tiles
+          const alpha = vis === 1 ? 0.5 : 1;
 
-          gfx.fillStyle(color, 1);
-          gfx.fillRect(px, py, pw, ph);
+          // Project tile position to isometric minimap space
+          const { mx, my } = this.tileToMinimap(tx, ty);
+          const pw = Math.max(1, Math.ceil(step * MINIMAP_SIZE / (MAP_WIDTH + MAP_HEIGHT)));
+          const ph = pw;
+
+          gfx.fillStyle(color, alpha);
+          gfx.fillRect(Math.floor(mx), Math.floor(my), pw, ph);
         }
       }
     }
 
-    // Draw buildings as colored dots
+    // Draw buildings as colored dots (isometric projection, fog-aware)
     const buildingSystem = gameScene?.buildingSystem;
     if (buildingSystem) {
       for (const building of buildingSystem.buildings.values()) {
+        // Skip buildings in unexplored fog
+        const bVis = fogGrid ? fogGrid[building.tileY * MAP_WIDTH + building.tileX] : 2;
+        if (bVis === 0) continue;
+
         let bColor: number;
         if (building.owner === -1) {
           bColor = PLAYER_COLORS.neutral;
@@ -473,27 +603,29 @@ export class UIScene extends Phaser.Scene {
           bColor = (PLAYER_COLORS as Record<number, number>)[building.owner] ?? PLAYER_COLORS.neutral;
         }
 
-        const bx = Math.floor(building.tileX * scaleX);
-        const by = Math.floor(building.tileY * scaleY);
-        const bw = Math.max(2, Math.ceil(building.stats.widthTiles * scaleX));
-        const bh = Math.max(2, Math.ceil(building.stats.heightTiles * scaleY));
+        const { mx, my } = this.tileToMinimap(building.tileX, building.tileY);
+        const bw = Math.max(2, Math.ceil(building.stats.widthTiles * 1.5));
+        const bh = Math.max(2, Math.ceil(building.stats.heightTiles * 1.5));
 
-        gfx.fillStyle(bColor, 1);
-        gfx.fillRect(bx, by, bw, bh);
+        gfx.fillStyle(bColor, bVis === 1 ? 0.5 : 1);
+        gfx.fillRect(Math.floor(mx) - 1, Math.floor(my) - 1, bw, bh);
       }
     }
 
-    // Draw units as bright dots
+    // Draw units as bright dots (isometric projection, only visible ones)
     const unitSystem = gameScene?.unitSystem;
     if (unitSystem) {
       for (const squad of unitSystem.squads.values()) {
+        // Only show own units or enemy units in visible (not just explored) tiles
+        const sVis = fogGrid ? fogGrid[squad.tileY * MAP_WIDTH + squad.tileX] : 2;
+        if (squad.owner !== 0 && sVis !== 2) continue;
+
         const uColor = (PLAYER_COLORS as Record<number, number>)[squad.owner] ?? 0xFFFFFF;
-        const ux = Math.floor(squad.tileX * scaleX);
-        const uy = Math.floor(squad.tileY * scaleY);
+        const { mx, my } = this.tileToMinimap(squad.tileX, squad.tileY);
 
         // Make unit dots bright and slightly larger
         gfx.fillStyle(uColor, 1);
-        gfx.fillRect(ux - 1, uy - 1, 3, 3);
+        gfx.fillRect(Math.floor(mx) - 1, Math.floor(my) - 1, 3, 3);
       }
     }
 
@@ -512,42 +644,53 @@ export class UIScene extends Phaser.Scene {
     if (!gameScene?.cameras?.main) return;
 
     const cam = gameScene.cameras.main;
-    const scaleX = MINIMAP_SIZE / MAP_WIDTH;
-    const scaleY = MINIMAP_SIZE / MAP_HEIGHT;
+    const wv = cam.worldView;
 
-    // Camera world view in tile coords
-    const camTileX = cam.worldView.x / TILE_SIZE;
-    const camTileY = cam.worldView.y / TILE_SIZE;
-    const camTileW = cam.worldView.width / TILE_SIZE;
-    const camTileH = cam.worldView.height / TILE_SIZE;
+    // Get the four corners of the camera's world view
+    const corners = [
+      { wx: wv.x, wy: wv.y },                           // top-left
+      { wx: wv.x + wv.width, wy: wv.y },                // top-right
+      { wx: wv.x + wv.width, wy: wv.y + wv.height },    // bottom-right
+      { wx: wv.x, wy: wv.y + wv.height },                // bottom-left
+    ];
 
-    // Convert to minimap pixel coords
-    const vpX = this.minimapX + camTileX * scaleX;
-    const vpY = this.minimapY + camTileY * scaleY;
-    const vpW = camTileW * scaleX;
-    const vpH = camTileH * scaleY;
+    // Convert each corner from world coords to tile coords, then to minimap coords
+    const mmCorners = corners.map(c => {
+      const tile = worldToTile(c.wx, c.wy);
+      const mm = this.tileToMinimap(tile.x, tile.y);
+      return { x: this.minimapX + mm.mx, y: this.minimapY + mm.my };
+    });
 
-    // Draw white rectangle outline
+    // Draw the viewport as a quadrilateral (camera rect becomes a rotated shape in iso minimap)
     this.minimapViewport.lineStyle(1, 0xFFFFFF, 0.9);
-    this.minimapViewport.strokeRect(vpX, vpY, vpW, vpH);
+    this.minimapViewport.beginPath();
+    this.minimapViewport.moveTo(mmCorners[0].x, mmCorners[0].y);
+    this.minimapViewport.lineTo(mmCorners[1].x, mmCorners[1].y);
+    this.minimapViewport.lineTo(mmCorners[2].x, mmCorners[2].y);
+    this.minimapViewport.lineTo(mmCorners[3].x, mmCorners[3].y);
+    this.minimapViewport.closePath();
+    this.minimapViewport.strokePath();
   }
 
   private onMinimapClick(pointer: Phaser.Input.Pointer): void {
-    // Convert minimap click to world tile coordinates
+    // Convert minimap click position to local minimap coords
     const localX = pointer.x - this.minimapX;
     const localY = pointer.y - this.minimapY;
 
-    const tileX = (localX / MINIMAP_SIZE) * MAP_WIDTH;
-    const tileY = (localY / MINIMAP_SIZE) * MAP_HEIGHT;
+    // Reverse the isometric minimap projection to get tile coords
+    const { tx, ty } = this.minimapToTile(localX, localY);
 
-    // Convert to world pixel position
-    const worldX = tileX * TILE_SIZE;
-    const worldY = tileY * TILE_SIZE;
+    // Clamp to map bounds — ignore clicks outside the diamond
+    const clampedTx = Math.max(0, Math.min(MAP_WIDTH - 1, Math.round(tx)));
+    const clampedTy = Math.max(0, Math.min(MAP_HEIGHT - 1, Math.round(ty)));
 
-    // Center the game camera on this position
+    // Convert tile coords to world pixel position using the isometric projection
+    const worldPos = tileToWorld(clampedTx, clampedTy);
+
+    // Center the game camera on this world position
     const gameScene = this.gameScene as any;
     if (gameScene?.cameras?.main) {
-      gameScene.cameras.main.centerOn(worldX, worldY);
+      gameScene.cameras.main.centerOn(worldPos.x, worldPos.y);
     }
   }
 
@@ -581,9 +724,9 @@ export class UIScene extends Phaser.Scene {
     this.selectionHpBar.clear();
     this.selectionHpBar.setVisible(false);
 
-    const panelX = INFO_PANEL_X;
-    const panelY = BOTTOM_BAR_Y + 8;
-    const panelW = INFO_PANEL_WIDTH;
+    const panelX = this.infoPanelX;
+    const panelY = this.bottomBarY + 8;
+    const panelW = this.infoPanelWidth;
 
     const gameScene = this.gameScene as any;
     const unitSystem = gameScene?.unitSystem;
@@ -1036,7 +1179,7 @@ export class UIScene extends Phaser.Scene {
     const textY = RESOURCE_BAR_HEIGHT / 2;
 
     // Game timer -- top-center-right area (between income rates and tier display)
-    this.timerText = this.add.text(VIEWPORT_WIDTH / 2 + 180, textY, '00:00', {
+    this.timerText = this.add.text(this.viewW / 2 + 180, textY, '00:00', {
       fontSize: '14px',
       fontFamily: FONT_FAMILY,
       color: '#FFFFFF',
@@ -1046,7 +1189,7 @@ export class UIScene extends Phaser.Scene {
     this.timerText.setDepth(UI_DEPTH + 1);
 
     // Game speed display -- right of timer
-    this.gameSpeedText = this.add.text(VIEWPORT_WIDTH / 2 + 240, textY, '1.0x', {
+    this.gameSpeedText = this.add.text(this.viewW / 2 + 240, textY, '1.0x', {
       fontSize: '13px',
       fontFamily: FONT_FAMILY,
       color: '#88FF88',
@@ -1060,7 +1203,7 @@ export class UIScene extends Phaser.Scene {
   // ═══════════════════════════════════════════════════════════════════════
 
   private createPauseOverlay(): void {
-    this.pauseOverlay = this.add.text(VIEWPORT_WIDTH / 2, VIEWPORT_HEIGHT / 2, 'PAUSED', {
+    this.pauseOverlay = this.add.text(this.viewW / 2, this.viewH / 2, 'PAUSED', {
       fontSize: '48px',
       fontFamily: FONT_FAMILY,
       color: '#FFFFFF',
@@ -1102,8 +1245,8 @@ export class UIScene extends Phaser.Scene {
     const queue = selectedBuilding.getQueue();
     if (!queue || queue.length === 0) return;
 
-    const barX = COMMAND_PANEL_X;
-    const barY = BOTTOM_BAR_Y + 8;
+    const barX = this.commandPanelX;
+    const barY = this.bottomBarY + 8;
 
     // Draw production queue below the production buttons
     const queueStartX = barX + 5;
@@ -1182,8 +1325,8 @@ export class UIScene extends Phaser.Scene {
     // Clear existing buttons
     this.clearActionButtons();
 
-    const barX = COMMAND_PANEL_X;
-    const barY = BOTTOM_BAR_Y + 8;
+    const barX = this.commandPanelX;
+    const barY = this.bottomBarY + 8;
 
     const gameScene = this.gameScene as any;
     const unitSystem = gameScene?.unitSystem;
@@ -1395,7 +1538,7 @@ export class UIScene extends Phaser.Scene {
   // ═══════════════════════════════════════════════════════════════════════
 
   private pushAlert(message: string, color: string = '#FFFFFF', flash: boolean = false): void {
-    const alertX = VIEWPORT_WIDTH - 300;
+    const alertX = this.viewW - 300;
     const alertY = 50; // Below resource bar
 
     // Shift existing alerts down
@@ -1587,7 +1730,7 @@ export class UIScene extends Phaser.Scene {
       const color = data.winner === 0 ? '#FFD700' : '#FF0000';
 
       // Show large centered text
-      const gameOverText = this.add.text(VIEWPORT_WIDTH / 2, VIEWPORT_HEIGHT / 2, winner, {
+      const gameOverText = this.add.text(this.viewW / 2, this.viewH / 2, winner, {
         fontSize: '64px',
         fontFamily: FONT_FAMILY,
         color,
@@ -1598,7 +1741,7 @@ export class UIScene extends Phaser.Scene {
       gameOverText.setOrigin(0.5, 0.5);
       gameOverText.setDepth(UI_DEPTH + 10);
 
-      const reasonText = this.add.text(VIEWPORT_WIDTH / 2, VIEWPORT_HEIGHT / 2 + 50, data.reason, {
+      const reasonText = this.add.text(this.viewW / 2, this.viewH / 2 + 50, data.reason, {
         fontSize: '18px',
         fontFamily: FONT_FAMILY,
         color: '#CCCCCC',
@@ -1627,11 +1770,9 @@ export class UIScene extends Phaser.Scene {
     // Update resource bar display
     this.updateResourceBar();
 
-    // Update selection panel based on current selection
-    this.updateSelectionPanel();
-
-    // Update action bar
-    this.updateActionBar();
+    // Selection panel and action bar are updated via event listeners
+    // (UNIT_SELECTED, UNIT_DESELECTED, BUILDING_SELECTED, SELECTION_CLEARED)
+    // — no need to rebuild every frame.
 
     // Update production queue UI (Feature 1)
     this.updateProductionQueueUI();

@@ -7,6 +7,7 @@
 import Phaser from 'phaser';
 import { TILE_SIZE } from '../data/config';
 import { EventBus, GameEvents } from '../utils/EventBus';
+import { tileToWorld } from '../utils/IsometricUtils';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -359,8 +360,9 @@ export class LogisticsSystem {
     tileY: number,
     amount: number,
   ): void {
-    const pixelX = tileX * TILE_SIZE + TILE_SIZE / 2;
-    const pixelY = tileY * TILE_SIZE + TILE_SIZE / 2;
+    const pos = tileToWorld(tileX, tileY);
+    const pixelX = pos.x;
+    const pixelY = pos.y;
 
     // Create visual: a small glowing crate marker
     const sprite = this.scene.add.graphics();
@@ -475,8 +477,9 @@ export class LogisticsSystem {
       }
 
       // ── Redraw with current pulse alpha ─────────────────────────────────
-      const pixelX = dropped.tileX * TILE_SIZE + TILE_SIZE / 2;
-      const pixelY = dropped.tileY * TILE_SIZE + TILE_SIZE / 2;
+      const pos = tileToWorld(dropped.tileX, dropped.tileY);
+      const pixelX = pos.x;
+      const pixelY = pos.y;
       this.drawDroppedGoodsSprite(dropped.sprite, pixelX, pixelY, pulseAlpha);
 
       // ── Check proximity to squads for auto-pickup ───────────────────────

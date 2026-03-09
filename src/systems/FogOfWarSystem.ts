@@ -12,9 +12,14 @@ import {
   MAP_WIDTH,
   MAP_HEIGHT,
   TILE_SIZE,
+  TILE_WIDTH,
+  TILE_HEIGHT,
+  WORLD_WIDTH,
+  WORLD_HEIGHT,
 } from '../data/config';
 import { Squad } from '../entities/Squad';
 import { Building } from '../entities/Building';
+import { tileToWorld, worldToTile } from '../utils/IsometricUtils';
 
 // Default sight range for buildings (BuildingStats doesn't include sightRange)
 const DEFAULT_BUILDING_SIGHT_RANGE = 6;
@@ -23,11 +28,15 @@ export class FogOfWarSystem {
   private scene: Phaser.Scene;
 
   // Per-player visibility grid (0=unexplored, 1=explored, 2=visible)
-  private visibility: Uint8Array[];
+  /** Per-player visibility grids. Public so the minimap can read fog state. */
+  visibility: Uint8Array[];
   private playerCount: number;
 
   // Fog overlay (world-space Graphics drawn on top of the game)
   private fogGraphics!: Phaser.GameObjects.Graphics;
+
+  // Static mask that blacks out the void beyond the isometric map diamond
+  private borderMask!: Phaser.GameObjects.Graphics;
 
   // Performance: only recalculate visibility every N ms
   private updateInterval: number = 200; // ms
@@ -53,6 +62,47 @@ export class FogOfWarSystem {
     }
 
     this.createFogOverlay();
+  }
+
+  // ─── Initial Reveal ──────────────────────────────────────────────────────────
+
+  /**
+   * Reveal a circular area around (centerTileX, centerTileY) for a player.
+   * Sets tiles to "visible" (2). Call this at game start to reveal the
+   * starting neighborhood so the player can see their compound and
+   * nearby buildings immediately.
+   */
+  revealArea(player: number, centerTileX: number, centerTileY: number, radius: number): void {
+    const grid = this.visibility[player];
+    const stamp = this.getSightStamp(radius);
+    this.applySightStamp(grid, centerTileX, centerTileY, stamp);
+  }
+
+  /**
+   * Reveal a rectangular area for a player. Sets all tiles within the
+   * rectangle to "visible" (2).
+   */
+  revealRect(player: number, x: number, y: number, w: number, h: number): void {
+    const grid = this.visibility[player];
+    for (let ty = y; ty < y + h && ty < MAP_HEIGHT; ty++) {
+      for (let tx = x; tx < x + w && tx < MAP_WIDTH; tx++) {
+        if (tx < 0 || ty < 0) continue;
+        grid[ty * MAP_WIDTH + tx] = 2;
+      }
+    }
+  }
+
+  /**
+   * Run an immediate visibility update for a player. Call after revealArea/revealRect
+   * to ensure entity visibility is correct on the very first frame.
+   */
+  immediateUpdate(
+    player: number,
+    squads: Squad[],
+    buildings: Building[],
+  ): void {
+    this.updateVisibility(player, squads, buildings);
+    this.updateEntityVisibility(player, squads, buildings);
   }
 
   // ─── Sight Stamp Computation ────────────────────────────────────────────────
@@ -97,6 +147,88 @@ export class FogOfWarSystem {
   private createFogOverlay(): void {
     this.fogGraphics = this.scene.add.graphics();
     this.fogGraphics.setDepth(45); // Above units (~10) but below UI elements (100)
+
+    this.createBorderMask();
+  }
+
+  /**
+   * Create a static Graphics overlay that fills the void outside the isometric
+   * map diamond with solid black. Rendered once at depth 46 (above fog).
+   *
+   * The isometric diamond has four corner points in world space:
+   *   Top:    tileToWorld(0, 0)
+   *   Right:  tileToWorld(MAP_WIDTH-1, 0)
+   *   Bottom: tileToWorld(MAP_WIDTH-1, MAP_HEIGHT-1)
+   *   Left:   tileToWorld(0, MAP_HEIGHT-1)
+   *
+   * We fill four triangular regions between the diamond edges and a large
+   * bounding rectangle that extends well beyond the world bounds.
+   */
+  private createBorderMask(): void {
+    this.borderMask = this.scene.add.graphics();
+    this.borderMask.setDepth(46); // Above fog (45)
+
+    // Compute the four diamond corner positions in world space.
+    // Add half-tile offsets so the mask aligns with the outer edges of the
+    // corner tiles rather than their centers.
+    const halfW = TILE_WIDTH / 2;
+    const halfH = TILE_HEIGHT / 2;
+
+    const topCenter = tileToWorld(0, 0);
+    const rightCenter = tileToWorld(MAP_WIDTH - 1, 0);
+    const bottomCenter = tileToWorld(MAP_WIDTH - 1, MAP_HEIGHT - 1);
+    const leftCenter = tileToWorld(0, MAP_HEIGHT - 1);
+
+    // Diamond outer edge points (the outermost pixel of each corner tile)
+    const dTop = { x: topCenter.x, y: topCenter.y - halfH };
+    const dRight = { x: rightCenter.x + halfW, y: rightCenter.y };
+    const dBottom = { x: bottomCenter.x, y: bottomCenter.y + halfH };
+    const dLeft = { x: leftCenter.x - halfW, y: leftCenter.y };
+
+    // Large bounding rectangle with generous padding beyond the world
+    const pad = 2000;
+    const rectLeft = -pad;
+    const rectTop = -pad;
+    const rectRight = WORLD_WIDTH + pad;
+    const rectBottom = WORLD_HEIGHT + pad;
+
+    this.borderMask.fillStyle(0x000000, 1.0);
+
+    // Top region: rect top-left -> rect top-right -> diamond Right -> diamond Top
+    this.borderMask.beginPath();
+    this.borderMask.moveTo(rectLeft, rectTop);
+    this.borderMask.lineTo(rectRight, rectTop);
+    this.borderMask.lineTo(dRight.x, dRight.y);
+    this.borderMask.lineTo(dTop.x, dTop.y);
+    this.borderMask.closePath();
+    this.borderMask.fillPath();
+
+    // Right region: rect top-right -> rect bottom-right -> diamond Bottom -> diamond Right
+    this.borderMask.beginPath();
+    this.borderMask.moveTo(rectRight, rectTop);
+    this.borderMask.lineTo(rectRight, rectBottom);
+    this.borderMask.lineTo(dBottom.x, dBottom.y);
+    this.borderMask.lineTo(dRight.x, dRight.y);
+    this.borderMask.closePath();
+    this.borderMask.fillPath();
+
+    // Bottom region: rect bottom-right -> rect bottom-left -> diamond Left -> diamond Bottom
+    this.borderMask.beginPath();
+    this.borderMask.moveTo(rectRight, rectBottom);
+    this.borderMask.lineTo(rectLeft, rectBottom);
+    this.borderMask.lineTo(dLeft.x, dLeft.y);
+    this.borderMask.lineTo(dBottom.x, dBottom.y);
+    this.borderMask.closePath();
+    this.borderMask.fillPath();
+
+    // Left region: rect bottom-left -> rect top-left -> diamond Top -> diamond Left
+    this.borderMask.beginPath();
+    this.borderMask.moveTo(rectLeft, rectBottom);
+    this.borderMask.lineTo(rectLeft, rectTop);
+    this.borderMask.lineTo(dTop.x, dTop.y);
+    this.borderMask.lineTo(dLeft.x, dLeft.y);
+    this.borderMask.closePath();
+    this.borderMask.fillPath();
   }
 
   // ─── Visibility Updates ───────────────────────────────────────────────────
@@ -169,7 +301,7 @@ export class FogOfWarSystem {
   // ─── Fog Rendering ────────────────────────────────────────────────────────
 
   /**
-   * Render the fog overlay for a given player, only drawing tiles visible
+   * Render the fog overlay for a given player, drawing isometric diamond tiles
    * within the camera's viewport.
    */
   private renderFog(
@@ -179,18 +311,51 @@ export class FogOfWarSystem {
     this.fogGraphics.clear();
 
     const grid = this.visibility[player];
+    const halfW = TILE_WIDTH / 2;
+    const halfH = TILE_HEIGHT / 2;
 
-    // Determine which tiles are on screen
-    const startTileX = Math.max(0, Math.floor(camera.worldView.x / TILE_SIZE));
-    const startTileY = Math.max(0, Math.floor(camera.worldView.y / TILE_SIZE));
+    // Convert camera viewport corners to tile coords for culling
+    const vx = camera.worldView.x;
+    const vy = camera.worldView.y;
+    const vw = camera.worldView.width;
+    const vh = camera.worldView.height;
+
+    const topLeft = worldToTile(vx, vy);
+    const topRight = worldToTile(vx + vw, vy);
+    const bottomLeft = worldToTile(vx, vy + vh);
+    const bottomRight = worldToTile(vx + vw, vy + vh);
+
+    // In isometric projection, the visible tile range doesn't map to a simple
+    // rectangle. Use the extremes from all four corners with generous margin.
+    const margin = 10;
+    const startTileX = Math.max(
+      0,
+      Math.min(topLeft.x, topRight.x, bottomLeft.x, bottomRight.x) - margin,
+    );
+    const startTileY = Math.max(
+      0,
+      Math.min(topLeft.y, topRight.y, bottomLeft.y, bottomRight.y) - margin,
+    );
     const endTileX = Math.min(
       MAP_WIDTH - 1,
-      Math.ceil((camera.worldView.x + camera.worldView.width) / TILE_SIZE),
+      Math.max(topLeft.x, topRight.x, bottomLeft.x, bottomRight.x) + margin,
     );
     const endTileY = Math.min(
       MAP_HEIGHT - 1,
-      Math.ceil((camera.worldView.y + camera.worldView.height) / TILE_SIZE),
+      Math.max(topLeft.y, topRight.y, bottomLeft.y, bottomRight.y) + margin,
     );
+
+    // Helper to draw an isometric diamond at the given tile position
+    const drawDiamond = (tx: number, ty: number): void => {
+      const center = tileToWorld(tx, ty);
+      this.fogGraphics.beginPath();
+      this.fogGraphics.moveTo(center.x, center.y - halfH); // top
+      this.fogGraphics.lineTo(center.x + halfW, center.y); // right
+      this.fogGraphics.lineTo(center.x, center.y + halfH); // bottom
+      this.fogGraphics.lineTo(center.x - halfW, center.y); // left
+      this.fogGraphics.closePath();
+      this.fogGraphics.fillPath();
+    };
 
     // Batch unexplored and explored fills separately for fewer style switches
     // Draw unexplored tiles (solid black)
@@ -199,12 +364,7 @@ export class FogOfWarSystem {
       for (let tx = startTileX; tx <= endTileX; tx++) {
         const vis = grid[ty * MAP_WIDTH + tx];
         if (vis === 0) {
-          this.fogGraphics.fillRect(
-            tx * TILE_SIZE,
-            ty * TILE_SIZE,
-            TILE_SIZE,
-            TILE_SIZE,
-          );
+          drawDiamond(tx, ty);
         }
       }
     }
@@ -215,12 +375,7 @@ export class FogOfWarSystem {
       for (let tx = startTileX; tx <= endTileX; tx++) {
         const vis = grid[ty * MAP_WIDTH + tx];
         if (vis === 1) {
-          this.fogGraphics.fillRect(
-            tx * TILE_SIZE,
-            ty * TILE_SIZE,
-            TILE_SIZE,
-            TILE_SIZE,
-          );
+          drawDiamond(tx, ty);
         }
       }
     }
@@ -361,10 +516,13 @@ export class FogOfWarSystem {
 
   // ─── Cleanup ──────────────────────────────────────────────────────────────
 
-  /** Destroy the fog overlay graphics object. */
+  /** Destroy the fog overlay graphics object and border mask. */
   destroy(): void {
     if (this.fogGraphics) {
       this.fogGraphics.destroy();
+    }
+    if (this.borderMask) {
+      this.borderMask.destroy();
     }
   }
 }
