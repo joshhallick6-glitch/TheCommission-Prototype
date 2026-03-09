@@ -63,9 +63,20 @@ Exports: `FamilyData` interface, `FAMILIES` array.
 
 **Imported by:** `UnitSystem.ts`, `FogOfWarSystem.ts`
 
-**Events emitted:** `UNIT_SELECTED`, `UNIT_DESELECTED`, `UNIT_DAMAGED`, `SQUAD_WIPED`
+**Exports:** `UnitStance` type (`'aggressive' | 'defensive' | 'stand_ground'`)
 
-**Notable:** Exports `setEnemyScanCallback()` which UnitSystem calls to inject enemy proximity scanning for attack-move behavior.
+**Key fields:**
+- `stance: UnitStance` -- defaults to `'aggressive'`. Controls auto-engage behavior:
+  - **aggressive:** Auto-engages nearby enemies when idle (via enemy scan callback).
+  - **defensive:** Fights back when attacked (needs `attacker` param in `takeDamage()`), then returns to original position via `defensiveReturnPosition`.
+  - **stand_ground:** Attacks only current target, never chases or auto-engages.
+- `setStance(newStance)` -- updates stance and emits `STANCE_CHANGED`.
+
+**Events emitted:** `UNIT_SELECTED`, `UNIT_DESELECTED`, `SQUAD_WIPED`, `STANCE_CHANGED`
+
+**Notable:**
+- Exports `setEnemyScanCallback()` which UnitSystem calls to inject enemy proximity scanning for attack-move behavior.
+- `takeDamage(amount, attacker?)` accepts an optional `attacker: Squad` reference. CombatSystem passes the attacking squad so defensive-stance units know who to fight back against.
 
 #### `Building.ts`
 **Imports from:** `config.ts` (TILE_WIDTH, TILE_HEIGHT, CAPTURE_TIME_BASE, CAPTURE_TIME_ENEMY, PLAYER_COLORS), `buildings.ts` (BuildingType, BuildingStats, BUILDING_DEFS), `units.ts` (UNIT_DEFS), `EventBus.ts` (EventBus, GameEvents), `IsometricUtils.ts` (tileToWorld, isoDepth, worldToTile)
@@ -138,7 +149,7 @@ Exports: `FamilyData` interface, `FAMILIES` array.
 **Events emitted:** `CORNER_CAPTURED`, `CORNER_LOST`, `INFLUENCE_UPDATED`
 
 #### `FogOfWarSystem.ts`
-**Imports from:** `config.ts` (MAP_WIDTH, MAP_HEIGHT, TILE_SIZE, TILE_WIDTH, TILE_HEIGHT, WORLD_WIDTH, WORLD_HEIGHT), `Squad.ts` (Squad), `Building.ts` (Building), `IsometricUtils.ts` (tileToWorld, worldToTile)
+**Imports from:** `config.ts` (MAP_WIDTH, MAP_HEIGHT, TILE_WIDTH, TILE_HEIGHT, WORLD_WIDTH, WORLD_HEIGHT), `Squad.ts` (Squad), `Building.ts` (Building), `IsometricUtils.ts` (tileToWorld, worldToTile)
 
 **Imported by:** `GameScene.ts`
 
@@ -167,7 +178,7 @@ Exports: `FamilyData` interface, `FAMILIES` array.
 #### `UIScene.ts`
 **Imports from:** `config.ts` (MAP_WIDTH, MAP_HEIGHT, PLAYER_COLORS, TIER_COSTS, STARTING_CASH, STARTING_GOODS, STARTING_INFLUENCE), `units.ts` (UnitType, UNIT_DEFS), `EventBus.ts` (EventBus, GameEvents), `IsometricUtils.ts` (tileToWorld, worldToTile)
 
-**Events listened:** `CASH_CHANGED`, `GOODS_CHANGED`, `INFLUENCE_CHANGED`, `INCOME_TICK`, `UNIT_SELECTED`, `UNIT_DESELECTED`, `BUILDING_SELECTED`, `SELECTION_CLEARED`, `BUILDING_CAPTURED`, `TRUCK_DESTROYED`, `GOODS_DELIVERED`, `TIER_ADVANCED`, `COMBAT_STARTED`, `SQUAD_WIPED`, `GAME_PAUSED`, `GAME_RESUMED`, `GAME_SPEED_CHANGED`, `UNIT_PRODUCED`, `TRANSPORT_GOODS`, `GAME_OVER`
+**Events listened:** `CASH_CHANGED`, `GOODS_CHANGED`, `INFLUENCE_CHANGED`, `INCOME_TICK`, `UNIT_SELECTED`, `UNIT_DESELECTED`, `BUILDING_SELECTED`, `SELECTION_CLEARED`, `STANCE_CHANGED`, `BUILDING_CAPTURED`, `TRUCK_DESTROYED`, `GOODS_DELIVERED`, `TIER_ADVANCED`, `COMBAT_STARTED`, `SQUAD_WIPED`, `GAME_PAUSED`, `GAME_RESUMED`, `GAME_SPEED_CHANGED`, `UNIT_PRODUCED`, `TRANSPORT_GOODS`, `GAME_OVER`
 
 ---
 
@@ -255,6 +266,12 @@ Every event in `GameEvents`, who emits it, who listens, and the argument signatu
 | `UNIT_KILLED` | `CombatSystem` | (none currently) | `(targetId: string, attackerId: string)` |
 | `SQUAD_WIPED` | `Squad.die()` | `UnitSystem`, `GameScene`, `UIScene` | `(squad: Squad)` |
 | `COMBAT_STARTED` | `UnitSystem.attackWithSelected()`, `CombatSystem.engageTarget()` | `UIScene` | `(attackerSquads/attackerId, target/targetId)` |
+
+### Stance Events
+
+| Event | Emitted by | Listened by | Arguments |
+|---|---|---|---|
+| `STANCE_CHANGED` | `Squad.setStance()` | `UIScene` | `({ squadId: string, stance: UnitStance })` |
 
 ### Logistics Events
 
@@ -407,8 +424,10 @@ Step  System.update(scaledDelta)          Dependencies & Notes
                                           callback: getSquadsNearTile (from UnitSystem).
 
  7    fogOfWarSystem.update(...)          Recalculates visibility grid every 200ms.
-                                          Renders fog overlay every frame (camera-
-                                          dependent). Hides/shows enemy entities.
+                                          Renders fog overlay only when dirty
+                                          (visibility changed) OR camera moved.
+                                          Skips redraw when stationary + unchanged.
+                                          Hides/shows enemy entities at 200ms rate.
                                           Needs all squads + buildings arrays.
 
  8    Hide garrisoned units               Post-processing: hides sprite/healthbar
@@ -556,8 +575,16 @@ Both `UnitSystem.attackWithSelected()` and `CombatSystem.engageTarget()` emit `C
 ### Building.update() vs BuildingSystem.validateCaptures()
 Building.update() advances the production queue but does NOT advance capture progress. Capture is solely driven by `BuildingSystem.validateCaptures()`, which is called separately in GameScene.update() with a callback that counts nearby squads. This split exists so capture speed scales with squad proximity.
 
-### Fog of War Updates are Throttled
-FogOfWarSystem recalculates the visibility grid only every 200ms (not every frame) for performance. However, the fog overlay is re-rendered every frame because the camera may have scrolled. Entity visibility (hide/show enemy sprites) is also only updated at the 200ms interval.
+### Fog of War Rendering is Optimized with Dirty Flags
+FogOfWarSystem recalculates the visibility grid only every 200ms (not every frame). The fog overlay is **not** redrawn every frame -- it uses a multi-layer dirty-flag system to skip unnecessary redraws:
+
+1. **Dirty flag:** Set when `updateVisibility()` runs (every 200ms) or when `revealArea()`/`revealRect()`/`immediateUpdate()` are called.
+2. **Camera movement detection:** Tracks the last camera viewport position. The fog is redrawn only when the camera moves more than 1px (avoids sub-pixel jitter redraws).
+3. **Viewport snapshot comparison:** When the dirty flag fires but the camera hasn't moved, the system compares the current visibility values within the viewport against a saved snapshot. If nothing on-screen actually changed (e.g., no units moved into/out of sight), the redraw is skipped entirely.
+
+When the camera is stationary and visibility hasn't changed, Phaser reuses the existing Graphics command buffer at zero additional cost -- no `clear()` + rebuild cycle. This eliminates the ~22,000 Graphics API calls per frame that previously ran on every frame.
+
+Entity visibility (hide/show enemy sprites) is also only updated at the 200ms interval.
 
 ### Pathfinding is Asynchronous
 `pathfinding.findPath()` returns a Promise. Path calculations are advanced by calling `pathfinding.update()` (done inside `UnitSystem.update()`). If many paths are requested simultaneously, they may not all resolve in the same frame (capped at 1000 iterations per frame per EasyStar instance).
@@ -570,3 +597,12 @@ UIScene gets a reference to GameScene with `this.scene.get('GameScene')` and cas
 
 ### Minimap Reads Fog State Directly
 UIScene's minimap renderer reads `fogOfWarSystem.visibility[]` directly (the array is public) to determine which areas to dim on the minimap, rather than going through events.
+
+### Unit Stance System
+Squads have a `stance` field (`UnitStance` type: `'aggressive' | 'defensive' | 'stand_ground'`) that controls automatic engagement and movement behavior:
+
+- **Aggressive** (default): Idle squads automatically scan for and engage nearby enemies within sight range using `enemyScanFn`. This is in addition to the existing attack-move scan that runs while units are moving toward a destination.
+- **Defensive**: Squads do not auto-engage enemies. When attacked (via `takeDamage` receiving an `attacker` argument from CombatSystem), the squad saves its current tile position as `defensiveReturnPosition`, sets the attacker as its target, and enters the `attacking` state. After combat ends (target dies), the squad navigates back to the saved position instead of going idle immediately.
+- **Stand Ground**: Squads attack enemies in range but never chase. In `updateCombat()`, if the target moves out of weapon range, the squad drops the target and returns to `idle` instead of pathfinding toward the enemy. Squads can still be ordered to move; they move to the new position then resume standing ground.
+
+Stance is changed via `Squad.setStance()`, which emits `STANCE_CHANGED`. The UIScene action bar shows three stance buttons (A/D/S) when units are selected, with the active stance highlighted. Clicking a stance button sets it on all selected squads.

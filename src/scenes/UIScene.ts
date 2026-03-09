@@ -387,33 +387,70 @@ export class UIScene extends Phaser.Scene {
   }
 
   private updateResourceBar(): void {
-    this.cashText.setText(`$${Math.floor(this.playerCash)}`);
-    this.goodsText.setText(`Goods: ${Math.floor(this.playerGoods)}`);
-    this.influenceText.setText(`Inf: ${Math.floor(this.playerInfluence)}`);
+    // Perf: only call setText() when the displayed value actually changes.
+    // Each setText() triggers internal texture re-rendering in Phaser, so
+    // skipping unchanged values avoids ~5+ unnecessary texture updates per frame.
 
-    this.incomeRateText.setText(
-      `+$${Math.floor(this.incomeRate)}/min  +${Math.floor(this.goodsRate)}g/min  +${Math.floor(this.influenceRate)}i/min`,
-    );
+    const cash = Math.floor(this.playerCash);
+    if (cash !== this.lastDisplayedCash) {
+      this.lastDisplayedCash = cash;
+      this.cashText.setText(`$${cash}`);
+    }
 
-    // Tier display
-    const tierNames: Record<number, string> = {
-      1: 'Street Crew',
-      2: 'Syndicate',
-      3: 'Crime Family',
-      4: 'Empire',
-    };
-    this.tierText.setText(`TIER ${this.currentTier}: ${tierNames[this.currentTier] ?? 'Unknown'}`);
+    const goods = Math.floor(this.playerGoods);
+    if (goods !== this.lastDisplayedGoods) {
+      this.lastDisplayedGoods = goods;
+      this.goodsText.setText(`Goods: ${goods}`);
+    }
 
-    // Update tier button appearance
+    const influence = Math.floor(this.playerInfluence);
+    if (influence !== this.lastDisplayedInfluence) {
+      this.lastDisplayedInfluence = influence;
+      this.influenceText.setText(`Inf: ${influence}`);
+    }
+
+    const incomeFloor = Math.floor(this.incomeRate);
+    const goodsFloor = Math.floor(this.goodsRate);
+    const influenceFloor = Math.floor(this.influenceRate);
+    if (
+      incomeFloor !== this.lastDisplayedIncomeRate ||
+      goodsFloor !== this.lastDisplayedGoodsRate ||
+      influenceFloor !== this.lastDisplayedInfluenceRate
+    ) {
+      this.lastDisplayedIncomeRate = incomeFloor;
+      this.lastDisplayedGoodsRate = goodsFloor;
+      this.lastDisplayedInfluenceRate = influenceFloor;
+      this.incomeRateText.setText(
+        `+$${incomeFloor}/min  +${goodsFloor}g/min  +${influenceFloor}i/min`,
+      );
+    }
+
+    // Tier display -- only update when tier changes
+    if (this.currentTier !== this.lastDisplayedTier) {
+      this.lastDisplayedTier = this.currentTier;
+      const tierNames: Record<number, string> = {
+        1: 'Street Crew',
+        2: 'Syndicate',
+        3: 'Crime Family',
+        4: 'Empire',
+      };
+      this.tierText.setText(`TIER ${this.currentTier}: ${tierNames[this.currentTier] ?? 'Unknown'}`);
+    }
+
+    // Tier button -- only update when affordability changes
     const nextTier = this.currentTier + 1;
     const cost = TIER_COSTS[nextTier as keyof typeof TIER_COSTS];
     if (cost) {
-      this.tierButtonLabel.setText(`TIER UP ($${cost.cash})`);
       const canAfford = this.playerCash >= cost.cash &&
         this.playerGoods >= cost.goods &&
         this.playerInfluence >= cost.influence;
-      this.tierButton.setFillStyle(canAfford ? 0x336633 : 0x333333, 0.9);
-    } else {
+      if (canAfford !== this.lastDisplayedTierCanAfford) {
+        this.lastDisplayedTierCanAfford = canAfford;
+        this.tierButtonLabel.setText(`TIER UP ($${cost.cash})`);
+        this.tierButton.setFillStyle(canAfford ? 0x336633 : 0x333333, 0.9);
+      }
+    } else if (this.lastDisplayedTierCanAfford !== null) {
+      this.lastDisplayedTierCanAfford = null;
       this.tierButtonLabel.setText('MAX TIER');
       this.tierButton.setFillStyle(0x333333, 0.9);
     }
@@ -1322,28 +1359,97 @@ export class UIScene extends Phaser.Scene {
   }
 
   private updateProductionQueueUI(): void {
-    // Clear previous queue text elements
-    for (const text of this.productionQueueTexts) {
-      text.destroy();
-    }
-    this.productionQueueTexts = [];
-    this.productionProgressBar.clear();
-    this.productionProgressBar.setVisible(false);
+    // Perf: avoid destroying/recreating all text objects every frame.
+    // Full rebuild only when dirty (queue structure changed). Between
+    // rebuilds we only update the progress text + bar cheaply.
 
     const gameScene = this.gameScene as any;
     const selectedBuilding = gameScene?.selectedBuilding;
 
-    if (!selectedBuilding || !selectedBuilding.stats.canProduceUnits || selectedBuilding.owner !== 0) {
+    // Detect structural changes that require a full rebuild
+    const buildingId: string = selectedBuilding?.id ?? '';
+    const queue = (selectedBuilding?.stats?.canProduceUnits && selectedBuilding.owner === 0)
+      ? selectedBuilding.getQueue()
+      : null;
+    const queueLen: number = queue?.length ?? 0;
+
+    if (buildingId !== this.productionQueueCachedBuildingId || queueLen !== this.productionQueueCachedLength) {
+      this.productionQueueDirty = true;
+    }
+
+    // Fast path: no queue visible
+    if (queueLen === 0) {
+      if (this.productionQueueTexts.length > 0 || this.productionProgressBar.visible) {
+        this.clearProductionQueueUI();
+      }
+      this.productionQueueCachedBuildingId = buildingId;
+      this.productionQueueCachedLength = 0;
+      this.productionQueueDirty = false;
       return;
     }
 
-    const queue = selectedBuilding.getQueue();
-    if (!queue || queue.length === 0) return;
+    // Full rebuild when dirty
+    if (this.productionQueueDirty) {
+      this.rebuildProductionQueueUI(selectedBuilding, queue!);
+      this.productionQueueDirty = false;
+      this.productionQueueCachedBuildingId = buildingId;
+      this.productionQueueCachedLength = queueLen;
+      return;
+    }
+
+    // Cheap per-frame update: progress text + bar for item 0 only
+    if (queue && queue.length > 0) {
+      const entry = queue[0];
+      const progress = Math.min(1, entry.progress / entry.totalTime);
+      const progressPct = Math.floor(progress * 100);
+
+      if (progressPct !== this.productionProgressCachedPct) {
+        this.productionProgressCachedPct = progressPct;
+
+        if (this.productionProgressText) {
+          const unitDef = UNIT_DEFS[entry.unitType as keyof typeof UNIT_DEFS];
+          const name = unitDef ? unitDef.name : entry.unitType;
+          this.productionProgressText.setText(`> ${name} (${progressPct}%)`);
+        }
+
+        // Redraw the progress bar
+        const barX = this.commandPanelX;
+        const barY = this.bottomBarY + 8;
+        const queueStartX = barX + 5;
+        const queueStartY = barY + 130;
+        const pbX = queueStartX;
+        const pbY = queueStartY + 18 + 14;
+        const pbW = COMMAND_PANEL_WIDTH - 20;
+        const pbH = 4;
+
+        this.productionProgressBar.clear();
+        this.productionProgressBar.setVisible(true);
+        this.productionProgressBar.fillStyle(0x333333, 0.9);
+        this.productionProgressBar.fillRect(pbX, pbY, pbW, pbH);
+        this.productionProgressBar.fillStyle(0x00CC00, 1);
+        this.productionProgressBar.fillRect(pbX, pbY, pbW * progress, pbH);
+      }
+    }
+  }
+
+  /** Destroy all production queue text objects and hide the progress bar. */
+  private clearProductionQueueUI(): void {
+    for (const text of this.productionQueueTexts) {
+      text.destroy();
+    }
+    this.productionQueueTexts = [];
+    this.productionProgressText = null;
+    this.productionProgressCachedPct = -1;
+    this.productionProgressBar.clear();
+    this.productionProgressBar.setVisible(false);
+  }
+
+  /** Full rebuild of the production queue text elements and progress bar. */
+  private rebuildProductionQueueUI(selectedBuilding: any, queue: any[]): void {
+    this.clearProductionQueueUI();
 
     const barX = this.commandPanelX;
     const barY = this.bottomBarY + 8;
-
-    // Draw production queue below the production buttons
     const queueStartX = barX + 5;
     const queueStartY = barY + 130;
 
@@ -1364,9 +1470,9 @@ export class UIScene extends Phaser.Scene {
       const yPos = queueStartY + 18 + i * 20;
 
       if (i === 0) {
-        // Currently producing -- show progress
         const progress = Math.min(1, entry.progress / entry.totalTime);
         const progressPct = Math.floor(progress * 100);
+        this.productionProgressCachedPct = progressPct;
 
         const text = this.add.text(queueStartX, yPos, `> ${name} (${progressPct}%)`, {
           fontSize: '11px',
@@ -1375,8 +1481,8 @@ export class UIScene extends Phaser.Scene {
         });
         text.setDepth(UI_DEPTH + 2);
         this.productionQueueTexts.push(text);
+        this.productionProgressText = text;
 
-        // Draw progress bar
         const pbX = queueStartX;
         const pbY = yPos + 14;
         const pbW = COMMAND_PANEL_WIDTH - 20;
@@ -1388,7 +1494,6 @@ export class UIScene extends Phaser.Scene {
         this.productionProgressBar.fillStyle(0x00CC00, 1);
         this.productionProgressBar.fillRect(pbX, pbY, pbW * progress, pbH);
       } else {
-        // Queued -- show with cancel hint
         const text = this.add.text(queueStartX, yPos, `  ${i + 1}. ${name}`, {
           fontSize: '11px',
           fontFamily: FONT_FAMILY,
@@ -1399,7 +1504,6 @@ export class UIScene extends Phaser.Scene {
       }
     }
 
-    // Rally point indicator
     if (selectedBuilding.rallyPoint) {
       const rpText = this.add.text(
         queueStartX,
@@ -1607,6 +1711,73 @@ export class UIScene extends Phaser.Scene {
         this.actionButtons.push({ background: bg, label: nameLabel, callback: cmd.cb, enabled: true });
         this.actionButtons.push({ background: icon as any, label: icon, callback: () => {}, enabled: true });
       }
+
+      // ── Stance buttons (below command grid) ──────────────────────────
+      const commandRows = Math.ceil(commands.length / 3);
+      const stanceY = gridY + commandRows * (btnSize + gap) + 8;
+
+      const stanceLabel = this.add.text(gridX, stanceY, 'STANCE', {
+        fontSize: '10px', fontFamily: FONT_FAMILY, color: '#8B7355', fontStyle: 'bold',
+      });
+      stanceLabel.setDepth(UI_DEPTH + 2);
+      this.actionButtons.push({ background: stanceLabel as any, label: stanceLabel, callback: () => {}, enabled: true });
+
+      // Determine current stance: use first selected squad's stance as reference
+      const currentStance: string = selected.length > 0 ? (selected[0].stance ?? 'aggressive') : 'aggressive';
+
+      const stanceBtnSize = 52;
+      const stanceBtnY = stanceY + 16 + stanceBtnSize / 2;
+      const stances: { key: string; icon: string; name: string; color: number }[] = [
+        { key: 'aggressive', icon: 'A', name: 'Aggr.', color: 0xCC4444 },
+        { key: 'defensive', icon: 'D', name: 'Defens.', color: 0x4488CC },
+        { key: 'stand_ground', icon: 'S', name: 'Stand', color: 0xCCAA44 },
+      ];
+
+      for (let si = 0; si < stances.length; si++) {
+        const st = stances[si];
+        const sbx = gridX + si * (stanceBtnSize + gap) + stanceBtnSize / 2;
+        const isActive = currentStance === st.key;
+
+        const sBg = this.add.rectangle(sbx, stanceBtnY, stanceBtnSize, stanceBtnSize,
+          isActive ? 0x2a2a2a : 0x1a1a1a, 0.9);
+        sBg.setDepth(UI_DEPTH + 1);
+        sBg.setStrokeStyle(isActive ? 2 : 1, isActive ? 0x00FF00 : 0x8B7355, isActive ? 1 : 0.8);
+        sBg.setInteractive({ useHandCursor: true });
+
+        const sIcon = this.add.text(sbx, stanceBtnY - 6, st.icon, {
+          fontSize: '18px', fontFamily: FONT_FAMILY,
+          color: `#${st.color.toString(16).padStart(6, '0')}`,
+          fontStyle: 'bold',
+        });
+        sIcon.setOrigin(0.5, 0.5);
+        sIcon.setDepth(UI_DEPTH + 2);
+
+        const sName = this.add.text(sbx, stanceBtnY + 12, st.name, {
+          fontSize: '9px', fontFamily: FONT_FAMILY, color: isActive ? '#FFFFFF' : '#CCCCCC',
+        });
+        sName.setOrigin(0.5, 0.5);
+        sName.setDepth(UI_DEPTH + 2);
+
+        sBg.on('pointerover', () => {
+          if (!isActive) sBg.setStrokeStyle(2, 0x00FF00, 1);
+        });
+        sBg.on('pointerout', () => {
+          if (!isActive) sBg.setStrokeStyle(1, 0x8B7355, 0.8);
+        });
+        sBg.on('pointerdown', () => {
+          // Set stance on all selected squads
+          for (const squad of selected) {
+            if (typeof squad.setStance === 'function') {
+              squad.setStance(st.key);
+            }
+          }
+          // Refresh the action bar to reflect the new active stance
+          this.updateActionBar();
+        });
+
+        this.actionButtons.push({ background: sBg, label: sName, callback: () => {}, enabled: true });
+        this.actionButtons.push({ background: sIcon as any, label: sIcon, callback: () => {}, enabled: true });
+      }
     }
   }
 
@@ -1788,6 +1959,11 @@ export class UIScene extends Phaser.Scene {
 
     EventBus.on(GameEvents.SELECTION_CLEARED, () => {
       this.updateSelectionPanel();
+      this.updateActionBar();
+    });
+
+    // ── Stance changed: refresh action bar to highlight new stance ──────
+    EventBus.on(GameEvents.STANCE_CHANGED, () => {
       this.updateActionBar();
     });
 
