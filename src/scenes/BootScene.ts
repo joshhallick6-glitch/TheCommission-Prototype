@@ -381,7 +381,7 @@ export class BootScene extends Phaser.Scene {
       const halfH = isoH / 2;
 
       // Wall height in pixels (taller buildings get more wall depth)
-      const wallHeight = Math.max(16, Math.min(32, def.widthTiles * 8));
+      const wallHeight = Math.max(24, Math.min(48, def.widthTiles * 12));
 
       // Total sprite size: diamond + wall extension below
       const spriteW = isoW;

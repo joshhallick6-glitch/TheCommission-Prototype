@@ -34,6 +34,13 @@ export interface StreetCornerPlacement {
   neighborhood: string;
 }
 
+export interface CityBlock {
+  tileX: number;
+  tileY: number;
+  widthTiles: number;
+  heightTiles: number;
+}
+
 // ─── Neighborhood definitions ────────────────────────────────────────────────
 
 interface NeighborhoodDef {
@@ -427,6 +434,52 @@ export class MapSystem {
       }
     }
     return 'Unknown';
+  }
+
+  /**
+   * Scan the terrain grid and return rectangular WALL clusters that form
+   * city blocks. Uses the road grid's predictable 8-tile interval structure.
+   * Each detected block represents the solid WALL interior of a sub-block,
+   * suitable for drawing a visual skyscraper on top.
+   */
+  detectCityBlocks(): CityBlock[] {
+    const blocks: CityBlock[] = [];
+
+    for (let by = 0; by < MAP_HEIGHT; by += 8) {
+      for (let bx = 0; bx < MAP_WIDTH; bx += 8) {
+        const interior = this.getBlockInterior(bx, by);
+        if (!interior) continue;
+
+        const { x0, y0, x1, y1 } = interior;
+        const w = x1 - x0 + 1;
+        const h = y1 - y0 + 1;
+
+        // Only count it as a city block if the interior is large enough
+        // and mostly WALL (>50% of tiles)
+        if (w < 2 || h < 2) continue;
+
+        let wallCount = 0;
+        const totalTiles = w * h;
+        for (let yy = y0; yy <= y1; yy++) {
+          for (let xx = x0; xx <= x1; xx++) {
+            if (this.grid[yy][xx] === TerrainType.WALL) {
+              wallCount++;
+            }
+          }
+        }
+
+        if (wallCount / totalTiles > 0.5) {
+          blocks.push({
+            tileX: x0,
+            tileY: y0,
+            widthTiles: w,
+            heightTiles: h,
+          });
+        }
+      }
+    }
+
+    return blocks;
   }
 
   // ─── City Generation Internals ──────────────────────────────────────────

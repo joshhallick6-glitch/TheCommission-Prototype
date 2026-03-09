@@ -6,6 +6,8 @@ import Phaser from 'phaser';
 import {
   MAP_WIDTH,
   MAP_HEIGHT,
+  TILE_WIDTH,
+  TILE_HEIGHT,
   WORLD_WIDTH,
   WORLD_HEIGHT,
   CAMERA_SCROLL_SPEED,
@@ -30,7 +32,8 @@ import { TerritorySystem } from '../systems/TerritorySystem';
 import { FogOfWarSystem } from '../systems/FogOfWarSystem';
 import { pathfinding } from '../utils/Pathfinding';
 import { EventBus, GameEvents } from '../utils/EventBus';
-import { tileToWorld, worldToTile as isoWorldToTile } from '../utils/IsometricUtils';
+import { tileToWorld, worldToTile as isoWorldToTile, isoDepth } from '../utils/IsometricUtils';
+import { CityBlock } from '../systems/MapSystem';
 
 // ─── Keyboard key references ────────────────────────────────────────────────
 
@@ -125,6 +128,9 @@ export class GameScene extends Phaser.Scene {
     this.buildingSystem = new BuildingSystem(this);
     const buildingPlacements = this.mapSystem.placeBuildings();
     this.buildingSystem.initializeFromPlacements(buildingPlacements);
+
+    // ── 3b. Create visual skyscraper sprites for city blocks ──────────
+    this.createCityBlockVisuals();
 
     // ── 4. Initialize unit system & pathfinding ─────────────────────────
     this.unitSystem = new UnitSystem(this);
@@ -1050,6 +1056,225 @@ export class GameScene extends Phaser.Scene {
     if (this.selectedBuilding) {
       this.selectedBuilding.deselect();
       this.selectedBuilding = null;
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // CITY BLOCK VISUALS (3D skyscraper rendering)
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /**
+   * Detect all city blocks and draw 3D isometric skyscraper visuals on top
+   * of the WALL terrain tiles. Purely cosmetic -- no interaction or gameplay.
+   */
+  private createCityBlockVisuals(): void {
+    const blocks = this.mapSystem.detectCityBlocks();
+    for (const block of blocks) {
+      this.drawSkyscraper(block);
+    }
+    console.log(`GameScene: drew ${blocks.length} skyscraper visuals`);
+  }
+
+  /**
+   * Draw a single 3D isometric skyscraper box for a city block using
+   * Phaser Graphics. Includes left wall, right wall, top face, outlines,
+   * and a window grid pattern on both walls.
+   *
+   * Uses a seeded random based on block position for deterministic
+   * colors and heights between sessions.
+   */
+  private drawSkyscraper(block: CityBlock): void {
+    const HALF_W = TILE_WIDTH / 2;   // 32
+    const HALF_H = TILE_HEIGHT / 2;  // 16
+
+    // Seeded random from block position for consistent appearance
+    const seed = block.tileX * 1000 + block.tileY;
+    const seededRand = (offset: number = 0): number => {
+      let s = (seed + offset) * 1664525 + 1013904223;
+      s = (s >>> 0) / 0x100000000;
+      return s;
+    };
+
+    // Vary building height based on block size + seeded randomness
+    const wallHeight = 40 + Math.floor(seededRand(1) * 50); // 40-90px
+
+    // NYC palette: grays, browns, brick, tan
+    const colors = [
+      0x6B6B6B, 0x7B6B5B, 0x8B7355, 0x696969,
+      0x808080, 0x5B5B5B, 0x8B4513, 0x7B5B3B,
+    ];
+    const baseColor = colors[Math.floor(seededRand(2) * colors.length)];
+
+    // Compute the four diamond vertices of the block footprint.
+    // For a block at (tx, ty) with size (w, h), the diamond corners are
+    // derived from the outermost tile centers offset by half-tile.
+    const tx = block.tileX;
+    const ty = block.tileY;
+    const w = block.widthTiles;
+    const h = block.heightTiles;
+
+    const topCenter = tileToWorld(tx, ty);
+    const topVertex = { x: topCenter.x, y: topCenter.y - HALF_H };
+
+    const rightCenter = tileToWorld(tx + w - 1, ty);
+    const rightVertex = { x: rightCenter.x + HALF_W, y: rightCenter.y };
+
+    const bottomCenter = tileToWorld(tx + w - 1, ty + h - 1);
+    const bottomVertex = { x: bottomCenter.x, y: bottomCenter.y + HALF_H };
+
+    const leftCenter = tileToWorld(tx, ty + h - 1);
+    const leftVertex = { x: leftCenter.x - HALF_W, y: leftCenter.y };
+
+    // Color shading helpers (inline to avoid importing BootScene utilities)
+    const darken = (hex: number, factor: number): number => {
+      const r = Math.floor(((hex >> 16) & 0xff) * factor);
+      const g = Math.floor(((hex >> 8) & 0xff) * factor);
+      const b = Math.floor((hex & 0xff) * factor);
+      return (r << 16) | (g << 8) | b;
+    };
+    const lighten = (hex: number, factor: number): number => {
+      const r = Math.min(255, ((hex >> 16) & 0xff) + Math.floor((255 - ((hex >> 16) & 0xff)) * factor));
+      const g = Math.min(255, ((hex >> 8) & 0xff) + Math.floor((255 - ((hex >> 8) & 0xff)) * factor));
+      const b = Math.min(255, (hex & 0xff) + Math.floor((255 - (hex & 0xff)) * factor));
+      return (r << 16) | (g << 8) | b;
+    };
+
+    const gfx = this.add.graphics();
+
+    // ── LEFT wall (medium shade) ──────────────────────────────────────
+    // Quad from left→bottom→(bottom shifted down)→(left shifted down)
+    gfx.fillStyle(baseColor, 1);
+    gfx.beginPath();
+    gfx.moveTo(leftVertex.x, leftVertex.y);
+    gfx.lineTo(bottomVertex.x, bottomVertex.y);
+    gfx.lineTo(bottomVertex.x, bottomVertex.y + wallHeight);
+    gfx.lineTo(leftVertex.x, leftVertex.y + wallHeight);
+    gfx.closePath();
+    gfx.fillPath();
+
+    // ── RIGHT wall (darker shade) ─────────────────────────────────────
+    gfx.fillStyle(darken(baseColor, 0.65), 1);
+    gfx.beginPath();
+    gfx.moveTo(rightVertex.x, rightVertex.y);
+    gfx.lineTo(bottomVertex.x, bottomVertex.y);
+    gfx.lineTo(bottomVertex.x, bottomVertex.y + wallHeight);
+    gfx.lineTo(rightVertex.x, rightVertex.y + wallHeight);
+    gfx.closePath();
+    gfx.fillPath();
+
+    // ── TOP face (lightest shade diamond) ─────────────────────────────
+    gfx.fillStyle(lighten(baseColor, 0.35), 1);
+    gfx.beginPath();
+    gfx.moveTo(topVertex.x, topVertex.y);
+    gfx.lineTo(rightVertex.x, rightVertex.y);
+    gfx.lineTo(bottomVertex.x, bottomVertex.y);
+    gfx.lineTo(leftVertex.x, leftVertex.y);
+    gfx.closePath();
+    gfx.fillPath();
+
+    // ── Window grid on LEFT wall ──────────────────────────────────────
+    this.drawWindowGrid(
+      gfx, leftVertex, bottomVertex, wallHeight, seededRand, 10,
+    );
+
+    // ── Window grid on RIGHT wall ─────────────────────────────────────
+    this.drawWindowGrid(
+      gfx, bottomVertex, rightVertex, wallHeight, seededRand, 100,
+    );
+
+    // ── Outlines ──────────────────────────────────────────────────────
+    gfx.lineStyle(1, darken(baseColor, 0.4), 1);
+
+    // Top face outline
+    gfx.beginPath();
+    gfx.moveTo(topVertex.x, topVertex.y);
+    gfx.lineTo(rightVertex.x, rightVertex.y);
+    gfx.lineTo(bottomVertex.x, bottomVertex.y);
+    gfx.lineTo(leftVertex.x, leftVertex.y);
+    gfx.closePath();
+    gfx.strokePath();
+
+    // Left wall outline
+    gfx.beginPath();
+    gfx.moveTo(leftVertex.x, leftVertex.y);
+    gfx.lineTo(leftVertex.x, leftVertex.y + wallHeight);
+    gfx.lineTo(bottomVertex.x, bottomVertex.y + wallHeight);
+    gfx.lineTo(bottomVertex.x, bottomVertex.y);
+    gfx.strokePath();
+
+    // Right wall outline
+    gfx.beginPath();
+    gfx.moveTo(rightVertex.x, rightVertex.y);
+    gfx.lineTo(rightVertex.x, rightVertex.y + wallHeight);
+    gfx.lineTo(bottomVertex.x, bottomVertex.y + wallHeight);
+    gfx.lineTo(bottomVertex.x, bottomVertex.y);
+    gfx.strokePath();
+
+    // Depth: use the block's bottom tile position for correct iso sorting
+    gfx.setDepth(isoDepth(tx + w, ty + h, 1));
+  }
+
+  /**
+   * Draw a grid of window rectangles on one wall face of a skyscraper.
+   * Windows are small quads that follow the wall's isometric slant.
+   * Some windows are randomly dark (unlit) for visual variety.
+   *
+   * @param gfx       Graphics object to draw on
+   * @param startV    Starting vertex of the wall (top-left corner of the wall face)
+   * @param endV      Ending vertex of the wall (top-right corner of the wall face)
+   * @param wallH     Wall height in pixels
+   * @param rng       Seeded random function
+   * @param seedOff   Seed offset for this wall's randomness
+   */
+  private drawWindowGrid(
+    gfx: Phaser.GameObjects.Graphics,
+    startV: { x: number; y: number },
+    endV: { x: number; y: number },
+    wallH: number,
+    rng: (offset: number) => number,
+    seedOff: number,
+  ): void {
+    const windowSpacingH = 12; // horizontal spacing along the wall
+    const windowSpacingV = 10; // vertical spacing
+    const windowW = 5;         // window width (along the wall's direction)
+    const windowH = 6;         // window height (vertical)
+
+    // Wall direction vector (top edge of the wall face)
+    const dx = endV.x - startV.x;
+    const dy = endV.y - startV.y;
+    const wallLen = Math.sqrt(dx * dx + dy * dy);
+    if (wallLen < windowSpacingH * 2) return; // too small for windows
+
+    // Normalize direction
+    const nx = dx / wallLen;
+    const ny = dy / wallLen;
+
+    const cols = Math.max(1, Math.floor((wallLen - windowSpacingH) / windowSpacingH));
+    const rows = Math.max(1, Math.floor((wallH - windowSpacingV) / windowSpacingV));
+
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < cols; col++) {
+        // Window position along the wall face
+        const t = (col + 0.5) / cols; // 0..1 along wall
+        const yOff = windowSpacingV + row * windowSpacingV;
+
+        // Base position at top of wall + offset along direction + offset down
+        const wx = startV.x + dx * t;
+        const wy = startV.y + dy * t + yOff;
+
+        // Randomly decide if window is lit or dark
+        const isLit = rng(seedOff + row * 100 + col) > 0.3;
+        const color = isLit ? 0xFFDD88 : 0x333333;
+
+        gfx.fillStyle(color, isLit ? 0.8 : 0.5);
+        // Draw a small parallelogram following the wall's slant
+        gfx.fillRect(
+          wx - windowW / 2,
+          wy - windowH / 2,
+          windowW,
+          windowH,
+        );
+      }
     }
   }
 
