@@ -36,6 +36,27 @@ import { tileToWorld, worldToTile as isoWorldToTile, isoDepth } from '../utils/I
 import { CityBlock } from '../systems/MapSystem';
 import { FAMILIES, FamilyModifiers, DEFAULT_MODIFIERS } from '../data/families';
 
+// ─── Constants ──────────────────────────────────────────────────────────────
+
+const HALF_W = TILE_WIDTH / 2;   // 32
+const HALF_H = TILE_HEIGHT / 2;  // 16
+
+// ─── Color helpers ──────────────────────────────────────────────────────────
+
+function darkenColor(hex: number, factor: number): number {
+  const r = Math.floor(((hex >> 16) & 0xff) * factor);
+  const g = Math.floor(((hex >> 8) & 0xff) * factor);
+  const b = Math.floor((hex & 0xff) * factor);
+  return (r << 16) | (g << 8) | b;
+}
+
+function lightenColor(hex: number, factor: number): number {
+  const r = Math.min(255, ((hex >> 16) & 0xff) + Math.floor((255 - ((hex >> 16) & 0xff)) * factor));
+  const g = Math.min(255, ((hex >> 8) & 0xff) + Math.floor((255 - ((hex >> 8) & 0xff)) * factor));
+  const b = Math.min(255, (hex & 0xff) + Math.floor((255 - (hex & 0xff)) * factor));
+  return (r << 16) | (g << 8) | b;
+}
+
 // ─── Keyboard key references ────────────────────────────────────────────────
 
 interface CameraKeys {
@@ -143,7 +164,11 @@ export class GameScene extends Phaser.Scene {
     cam.setBounds(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
     cam.setZoom(1.0);
 
-    // ── 3. Initialize building system ───────────────────────────────────
+    // ── 3. Detect city blocks BEFORE placing buildings ─────────────────
+    // (placeBuildings converts WALL→BUILDING_FLOOR, which would hide blocks)
+    const cityBlocks = this.mapSystem.detectCityBlocks();
+
+    // ── 3b. Initialize building system ───────────────────────────────
     this.buildingSystem = new BuildingSystem(this);
     const buildingPlacements = this.mapSystem.placeBuildings();
     this.buildingSystem.initializeFromPlacements(buildingPlacements);
@@ -159,8 +184,8 @@ export class GameScene extends Phaser.Scene {
       }
     }
 
-    // ── 3b. Create visual skyscraper sprites for city blocks ──────────
-    this.createCityBlockVisuals();
+    // ── 3c. Create visual skyscrapers for ALL city blocks ─────────────
+    this.createCityBlockVisuals(cityBlocks);
 
     // ── 4. Initialize unit system & pathfinding ─────────────────────────
     this.unitSystem = new UnitSystem(this);
@@ -1117,44 +1142,67 @@ export class GameScene extends Phaser.Scene {
    * Detect all city blocks and draw 3D isometric skyscraper visuals on top
    * of the WALL terrain tiles. Purely cosmetic -- no interaction or gameplay.
    */
-  private createCityBlockVisuals(): void {
-    const blocks = this.mapSystem.detectCityBlocks();
+  private createCityBlockVisuals(blocks: CityBlock[]): void {
 
-    // Only LARGE buildings (area > 4 tiles) should replace a skyscraper.
-    // Small storefronts sit at the base of the skyscraper and coexist.
-    const largeBuildingTiles = new Set<string>();
+    // Build tile lookup: map each tile to the building (if any) that occupies it
+    const buildingByTile = new Map<string, { color: number; name: string; isLarge: boolean }>();
+
     if (this.buildingSystem) {
       for (const b of this.buildingSystem.buildings.values()) {
         const area = b.stats.widthTiles * b.stats.heightTiles;
-        if (area <= 4) continue; // small storefronts don't remove skyscrapers
-        const bw = b.stats.widthTiles;
-        const bh = b.stats.heightTiles;
-        for (let dy = 0; dy < bh; dy++) {
-          for (let dx = 0; dx < bw; dx++) {
-            largeBuildingTiles.add(`${b.tileX + dx},${b.tileY + dy}`);
+        const isLarge = area > 4;
+        for (let dy = 0; dy < b.stats.heightTiles; dy++) {
+          for (let dx = 0; dx < b.stats.widthTiles; dx++) {
+            buildingByTile.set(`${b.tileX + dx},${b.tileY + dy}`, {
+              color: b.stats.color,
+              name: b.stats.name,
+              isLarge,
+            });
           }
         }
       }
     }
 
-    let drawn = 0;
-    for (const block of blocks) {
-      let overlapsLarge = false;
-      outer:
-      for (let dy = 0; dy < block.heightTiles; dy++) {
-        for (let dx = 0; dx < block.widthTiles; dx++) {
-          if (largeBuildingTiles.has(`${block.tileX + dx},${block.tileY + dy}`)) {
-            overlapsLarge = true;
-            break outer;
+    // Build a reverse map: for each building, find which block contains it
+    const buildingToBlock = new Map<string, CityBlock>();
+    if (this.buildingSystem) {
+      for (const b of this.buildingSystem.buildings.values()) {
+        // Find the block that contains this building's origin tile
+        for (const block of blocks) {
+          if (b.tileX >= block.tileX && b.tileX < block.tileX + block.widthTiles &&
+              b.tileY >= block.tileY && b.tileY < block.tileY + block.heightTiles) {
+            buildingToBlock.set(b.id, block);
+            break;
           }
         }
       }
-      if (!overlapsLarge) {
-        this.drawSkyscraper(block);
-        drawn++;
+    }
+
+    // Draw skyscrapers for ALL blocks
+    for (const block of blocks) {
+      let largeBuildingColor: number | null = null;
+      for (let dy = 0; dy < block.heightTiles && !largeBuildingColor; dy++) {
+        for (let dx = 0; dx < block.widthTiles && !largeBuildingColor; dx++) {
+          const info = buildingByTile.get(`${block.tileX + dx},${block.tileY + dy}`);
+          if (info?.isLarge) largeBuildingColor = info.color;
+        }
+      }
+      this.drawSkyscraper(block, buildingByTile, largeBuildingColor);
+    }
+
+    // Draw storefront panels for each building on its block's wall.
+    // Track used wall slots per block to prevent overlap.
+    const usedSlots = new Map<string, Set<number>>(); // blockKey -> set of used Y slots
+
+    if (this.buildingSystem) {
+      for (const b of this.buildingSystem.buildings.values()) {
+        const block = buildingToBlock.get(b.id);
+        if (!block) continue;
+        const blockKey = `${block.tileX},${block.tileY}`;
+        if (!usedSlots.has(blockKey)) usedSlots.set(blockKey, new Set());
+        this.drawBuildingStorefront(b, block, usedSlots.get(blockKey)!);
       }
     }
-    console.log(`GameScene: drew ${drawn}/${blocks.length} skyscraper visuals (${blocks.length - drawn} skipped for large buildings)`);
   }
 
   /**
@@ -1165,7 +1213,11 @@ export class GameScene extends Phaser.Scene {
    * Uses a seeded random based on block position for deterministic
    * colors and heights between sessions.
    */
-  private drawSkyscraper(block: CityBlock): void {
+  private drawSkyscraper(
+    block: CityBlock,
+    buildingByTile: Map<string, { color: number; name: string; isLarge: boolean }>,
+    largeBuildingColor: number | null,
+  ): void {
     const HALF_W = TILE_WIDTH / 2;   // 32
     const HALF_H = TILE_HEIGHT / 2;  // 16
 
@@ -1186,7 +1238,18 @@ export class GameScene extends Phaser.Scene {
       0x6B6B6B, 0x7B6B5B, 0x8B7355, 0x696969,
       0x808080, 0x5B5B5B, 0x8B4513, 0x7B5B3B,
     ];
-    const baseColor = colors[Math.floor(seededRand(2) * colors.length)];
+    let baseColor = colors[Math.floor(seededRand(2) * colors.length)];
+
+    // If this block contains a large building, blend its color into the palette
+    if (largeBuildingColor !== null) {
+      const blend = (c1: number, c2: number, t: number): number => {
+        const r = Math.floor(((c1 >> 16) & 0xff) * (1 - t) + ((c2 >> 16) & 0xff) * t);
+        const g = Math.floor(((c1 >> 8) & 0xff) * (1 - t) + ((c2 >> 8) & 0xff) * t);
+        const b = Math.floor((c1 & 0xff) * (1 - t) + (c2 & 0xff) * t);
+        return (r << 16) | (g << 8) | b;
+      };
+      baseColor = blend(baseColor, largeBuildingColor, 0.35);
+    }
 
     // Compute the four diamond vertices of the block footprint (ground level).
     const tx = block.tileX;
@@ -1367,6 +1430,171 @@ export class GameScene extends Phaser.Scene {
         );
       }
     }
+  }
+
+  /**
+   * Draw a storefront panel for a building on the wall of its block.
+   * Uses the left (SW) wall, falling back to right (SE) wall if the left
+   * slot is already taken. Stores pixel bounds on the building for click detection.
+   */
+  private drawBuildingStorefront(building: any, block: CityBlock, usedSlots: Set<number>): void {
+    const tx = block.tileX;
+    const ty = block.tileY;
+    const bw = block.widthTiles;
+    const bh = block.heightTiles;
+
+    // Compute block wall vertices (must match drawSkyscraper)
+    const topCenter = tileToWorld(tx, ty);
+    const leftCenter = tileToWorld(tx, ty + bh - 1);
+    const bottomCenter = tileToWorld(tx + bw - 1, ty + bh - 1);
+    const rightCenter = tileToWorld(tx + bw - 1, ty);
+
+    const topVertex = { x: topCenter.x, y: topCenter.y - HALF_H };
+    const leftVertex = { x: leftCenter.x - HALF_W, y: leftCenter.y };
+    const bottomVertex = { x: bottomCenter.x, y: bottomCenter.y + HALF_H };
+    const rightVertex = { x: rightCenter.x + HALF_W, y: rightCenter.y };
+
+    // Seeded wall height (must match drawSkyscraper)
+    const seed = tx * 1000 + ty;
+    let s = (seed + 1) * 1664525 + 1013904223;
+    const wallHeight = 50 + Math.floor(((s >>> 0) / 0x100000000) * 60);
+    const panelH = Math.min(28, Math.floor(wallHeight * 0.45));
+    const awningH = 5;
+    const totalH = panelH + awningH;
+
+    // Assign a unique slot index for this building to prevent overlap.
+    // Each slot is one tile-height wide on the wall.
+    let slot = -1;
+    const maxSlots = Math.max(bh, bw);
+    for (let i = 0; i < maxSlots * 2; i++) {
+      if (!usedSlots.has(i)) {
+        slot = i;
+        usedSlots.add(i);
+        // Mark adjacent slots for wider buildings
+        const extraSlots = Math.max(building.stats.widthTiles, building.stats.heightTiles) - 1;
+        for (let j = 1; j <= extraSlots && (i + j) < maxSlots * 2; j++) {
+          usedSlots.add(i + j);
+        }
+        break;
+      }
+    }
+    if (slot === -1) return; // no room
+
+    // Decide wall: slots 0..bh-1 go on left wall, bh+ go on right wall
+    const useLeftWall = slot < bh;
+
+    let x0: number, y0: number, x1: number, y1: number;
+    let wallAlpha = 0.9;
+
+    if (useLeftWall) {
+      const t0 = slot / bh;
+      const slotSpan = Math.min(Math.max(building.stats.heightTiles, building.stats.widthTiles), bh - slot);
+      const t1 = (slot + slotSpan) / bh;
+      x0 = leftVertex.x + (bottomVertex.x - leftVertex.x) * t0;
+      y0 = leftVertex.y + (bottomVertex.y - leftVertex.y) * t0;
+      x1 = leftVertex.x + (bottomVertex.x - leftVertex.x) * t1;
+      y1 = leftVertex.y + (bottomVertex.y - leftVertex.y) * t1;
+      wallAlpha = 0.9;
+    } else {
+      const rSlot = slot - bh;
+      const t0 = rSlot / bw;
+      const slotSpan = Math.min(Math.max(building.stats.widthTiles, building.stats.heightTiles), bw - rSlot);
+      const t1 = (rSlot + slotSpan) / bw;
+      x0 = bottomVertex.x + (rightVertex.x - bottomVertex.x) * t0;
+      y0 = bottomVertex.y + (rightVertex.y - bottomVertex.y) * t0;
+      x1 = bottomVertex.x + (rightVertex.x - bottomVertex.x) * t1;
+      y1 = bottomVertex.y + (rightVertex.y - bottomVertex.y) * t1;
+      wallAlpha = 0.7; // darker for SE wall
+    }
+
+    // Store the four parallelogram corners on the building for click detection and border
+    building.storefrontBounds = {
+      blX: x0, blY: y0,                    // bottom-left (ground)
+      brX: x1, brY: y1,                    // bottom-right (ground)
+      trX: x1, trY: y1 - totalH,           // top-right (above ground)
+      tlX: x0, tlY: y0 - totalH,           // top-left (above ground)
+    };
+
+    const bColor = building.stats.color;
+    const gfx = this.add.graphics();
+    const depth = isoDepth(tx + bw - 1, ty + bh - 1, 0) + 0.05;
+    gfx.setDepth(depth);
+
+    // ── Main panel ──────────────────────────────────────────────────
+    gfx.fillStyle(bColor, wallAlpha);
+    gfx.beginPath();
+    gfx.moveTo(x0, y0);
+    gfx.lineTo(x1, y1);
+    gfx.lineTo(x1, y1 - panelH);
+    gfx.lineTo(x0, y0 - panelH);
+    gfx.closePath();
+    gfx.fillPath();
+
+    // ── Awning ──────────────────────────────────────────────────────
+    gfx.fillStyle(lightenColor(bColor, 0.35), 0.9);
+    gfx.beginPath();
+    gfx.moveTo(x0, y0 - panelH);
+    gfx.lineTo(x1, y1 - panelH);
+    gfx.lineTo(x1, y1 - totalH);
+    gfx.lineTo(x0, y0 - totalH);
+    gfx.closePath();
+    gfx.fillPath();
+
+    // Awning top edge
+    gfx.lineStyle(1, 0xffffff, 0.5);
+    gfx.beginPath();
+    gfx.moveTo(x0 - 1, y0 - totalH);
+    gfx.lineTo(x1 + 1, y1 - totalH);
+    gfx.strokePath();
+
+    // ── Door ────────────────────────────────────────────────────────
+    const midX = (x0 + x1) / 2;
+    const midY = (y0 + y1) / 2;
+    const doorW = Math.max(4, Math.abs(x1 - x0) * 0.18);
+    const doorH = panelH * 0.55;
+    gfx.fillStyle(darkenColor(bColor, 0.25), 1);
+    gfx.fillRect(midX - doorW / 2, midY - doorH * 0.2, doorW, doorH);
+
+    // ── Windows ─────────────────────────────────────────────────────
+    const panelW = Math.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2);
+    if (panelW > 20) {
+      const winSize = 3;
+      const winY = midY - panelH * 0.35;
+      const winGap = doorW * 1.8;
+      gfx.fillStyle(0xFFDD88, 0.75);
+      gfx.fillRect(midX - winGap - winSize, winY, winSize, winSize);
+      gfx.fillRect(midX + winGap, winY, winSize, winSize);
+      if (panelW > 40) {
+        gfx.fillRect(midX - winGap * 2 - winSize, winY, winSize, winSize);
+        gfx.fillRect(midX + winGap * 2, winY, winSize, winSize);
+      }
+    }
+
+    // ── Side borders ────────────────────────────────────────────────
+    gfx.lineStyle(1, 0x000000, 0.5);
+    gfx.beginPath();
+    gfx.moveTo(x0, y0);
+    gfx.lineTo(x0, y0 - totalH);
+    gfx.moveTo(x1, y1);
+    gfx.lineTo(x1, y1 - totalH);
+    gfx.strokePath();
+
+    // ── Name text ───────────────────────────────────────────────────
+    const abbrevMap: Record<string, string> = {
+      compound: 'HQ', speakeasy: 'SPEAKEASY', corner_store: 'STORE',
+      back_alley_still: 'STILL', bookie_joint: 'BOOKIE', warehouse: 'WAREHOUSE',
+      boxing_gym: 'GYM', nightclub: 'NIGHTCLUB', distillery: 'DISTILLERY',
+      trucking_depot: 'TRUCKING', pawn_shop: 'PAWN', casino: 'CASINO',
+      import_dock: 'DOCKS', city_hall_contact: 'CITY HALL', newspaper_office: 'NEWS',
+    };
+    const nameText = abbrevMap[building.type] ?? building.stats.name;
+    const label = this.add.text(
+      midX, (y0 + y1) / 2 - panelH - awningH / 2,
+      nameText,
+      { fontSize: '7px', fontFamily: 'Arial', color: '#ffffff', fontStyle: 'bold', stroke: '#000000', strokeThickness: 2 },
+    );
+    label.setOrigin(0.5, 0.5);
+    label.setDepth(depth + 0.01);
   }
 
   // ═══════════════════════════════════════════════════════════════════════

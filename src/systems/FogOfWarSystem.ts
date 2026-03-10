@@ -480,14 +480,18 @@ export class FogOfWarSystem {
       0,
       Math.min(topLeft.y, topRight.y, bottomLeft.y, bottomRight.y) - margin,
     );
-    const endTileX = Math.min(
+    let endTileX = Math.min(
       MAP_WIDTH - 1,
       Math.max(topLeft.x, topRight.x, bottomLeft.x, bottomRight.x) + margin,
     );
-    const endTileY = Math.min(
+    let endTileY = Math.min(
       MAP_HEIGHT - 1,
       Math.max(topLeft.y, topRight.y, bottomLeft.y, bottomRight.y) + margin,
     );
+
+    // Ensure valid range (camera can be outside world bounds)
+    if (endTileX < startTileX) endTileX = startTileX;
+    if (endTileY < startTileY) endTileY = startTileY;
 
     return { startTileX, startTileY, endTileX, endTileY };
   }
